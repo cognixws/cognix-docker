@@ -1,11 +1,11 @@
 // Package engine talks to the Docker Engine's own HTTP API over its Unix
 // socket. It never executes a shell (except to ask an installed `docker`
 // CLI which context is selected, purely to resolve the socket path) and
-// never elevates privileges. Ported from PiCode's internal/docker (the
-// built-in Docker app moved out to this extension, ADR-0230 D3/E5).
+// never elevates privileges.
 package engine
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -45,8 +46,10 @@ func (e *APIError) Error() string { return e.Message }
 
 type Mount struct {
 	Type        string `json:"type"`
+	Source      string `json:"source,omitempty"`
 	Name        string `json:"name,omitempty"`
 	Destination string `json:"destination"`
+	RW          bool   `json:"rw"`
 }
 
 type networkAttachment struct{ NetworkID string }
@@ -62,6 +65,17 @@ func networkIDs(networks map[string]networkAttachment) []string {
 	return ids
 }
 
+func networkNames(networks map[string]networkAttachment) []string {
+	names := []string{}
+	for name := range networks {
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 type Container struct {
 	ID             string   `json:"id"`
 	Name           string   `json:"name"`
@@ -72,14 +86,17 @@ type Container struct {
 	Project        string   `json:"project,omitempty"`
 	Service        string   `json:"service,omitempty"`
 	WorkingDir     string   `json:"workingDir,omitempty"`
+	ComposeFiles   string   `json:"composeFiles,omitempty"`
 	StartedAt      string   `json:"startedAt,omitempty"`
 	Health         string   `json:"health,omitempty"`
 	HasHealthCheck bool     `json:"hasHealthCheck"`
 	RestartCount   int      `json:"restartCount"`
 	ExitCode       int      `json:"exitCode"`
 	OOMKilled      bool     `json:"oomKilled"`
+	Ports          []string `json:"ports,omitempty"`
 	Mounts         []Mount  `json:"mounts,omitempty"`
 	Networks       []string `json:"networks,omitempty"`
+	NetworkNames   []string `json:"networkNames,omitempty"`
 	Secrets        []string `json:"-"`
 	TTY            bool     `json:"-"`
 }
@@ -97,9 +114,15 @@ type Logs struct {
 	SampledAt string `json:"sampledAt"`
 }
 
-// EndpointFrom respects Docker's explicit context before DOCKER_HOST. The
-// injected context lookup keeps resolution testable without local
-// credentials.
+type LogEntry struct {
+	Timestamp string `json:"ts"`
+	Service   string `json:"service"`
+	Container string `json:"container"`
+	Level     string `json:"level"` // INF | WRN | ERR
+	Message   string `json:"message"`
+}
+
+// EndpointFrom respects Docker's explicit context before DOCKER_HOST.
 func EndpointFrom(env func(string) string, contextHost func() (string, error)) (string, error) {
 	endpoint := strings.TrimSpace(env("PICODE_DOCKER_HOST"))
 	if endpoint == "" {
@@ -161,7 +184,7 @@ func NewClient(endpoint string) (*Client, error) {
 	u, _ := url.Parse(endpoint)
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "unix", u.Path)
-	}, MaxIdleConns: 4, IdleConnTimeout: 30 * time.Second}
+	}, MaxIdleConns: 6, IdleConnTimeout: 30 * time.Second}
 	return &Client{Endpoint: endpoint, HTTP: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
 
@@ -224,6 +247,65 @@ func labels(c *Container, l map[string]string) {
 	c.Project = l["com.docker.compose.project"]
 	c.Service = l["com.docker.compose.service"]
 	c.WorkingDir = l["com.docker.compose.project.working_dir"]
+	c.ComposeFiles = l["com.docker.compose.project.config_files"]
+}
+
+type apiPort struct {
+	IP          string `json:"IP"`
+	PrivatePort int    `json:"PrivatePort"`
+	PublicPort  int    `json:"PublicPort"`
+	Type        string `json:"Type"`
+}
+
+func formatListPorts(ports []apiPort) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, p := range ports {
+		if p.PublicPort <= 0 {
+			continue
+		}
+		host := ""
+		if p.IP != "" && p.IP != "0.0.0.0" && p.IP != "::" {
+			host = p.IP
+		}
+		typ := p.Type
+		if typ == "" {
+			typ = "tcp"
+		}
+		s := fmt.Sprintf("%s:%d->%d/%s", host, p.PublicPort, p.PrivatePort, typ)
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func formatInspectPorts(pm map[string][]struct {
+	HostIP   string `json:"HostIp"`
+	HostPort string `json:"HostPort"`
+}) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for priv, binds := range pm {
+		for _, b := range binds {
+			if b.HostPort == "" {
+				continue
+			}
+			host := ""
+			if b.HostIP != "" && b.HostIP != "0.0.0.0" && b.HostIP != "::" {
+				host = b.HostIP
+			}
+			s := fmt.Sprintf("%s:%s->%s", host, b.HostPort, priv)
+			if !seen[s] {
+				seen[s] = true
+				out = append(out, s)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (c *Client) Containers(ctx context.Context) ([]Container, error) {
@@ -232,6 +314,7 @@ func (c *Client) Containers(ctx context.Context) ([]Container, error) {
 		Names                []string
 		Image, State, Status string
 		ImageID              string
+		Ports                []apiPort
 		Mounts               []Mount
 		NetworkSettings      struct{ Networks map[string]networkAttachment }
 		Labels               map[string]string
@@ -242,7 +325,17 @@ func (c *Client) Containers(ctx context.Context) ([]Container, error) {
 	out := []Container{}
 	for _, r := range rows {
 		v := Container{ID: r.ID, Image: r.Image, State: r.State, Status: r.Status, Name: r.ID[:min(12, len(r.ID))]}
-		v.ImageID, v.Mounts, v.Networks = r.ImageID, r.Mounts, networkIDs(r.NetworkSettings.Networks)
+		v.ImageID, v.Mounts = r.ImageID, r.Mounts
+		v.Ports = formatListPorts(r.Ports)
+		v.Networks = networkIDs(r.NetworkSettings.Networks)
+		v.NetworkNames = networkNames(r.NetworkSettings.Networks)
+		if strings.Contains(strings.ToLower(r.Status), "(healthy)") {
+			v.Health, v.HasHealthCheck = "healthy", true
+		} else if strings.Contains(strings.ToLower(r.Status), "(unhealthy)") {
+			v.Health, v.HasHealthCheck = "unhealthy", true
+		} else if strings.Contains(strings.ToLower(r.Status), "(health: starting)") {
+			v.Health, v.HasHealthCheck = "starting", true
+		}
 		if len(r.Names) > 0 {
 			v.Name = strings.TrimPrefix(r.Names[0], "/")
 		}
@@ -263,8 +356,14 @@ func (c *Client) Inspect(ctx context.Context, id string) (Container, error) {
 		Image           string
 		RestartCount    int
 		Mounts          []Mount
-		NetworkSettings struct{ Networks map[string]networkAttachment }
-		Config          struct {
+		NetworkSettings struct {
+			Networks map[string]networkAttachment
+			Ports    map[string][]struct {
+				HostIP   string `json:"HostIp"`
+				HostPort string `json:"HostPort"`
+			}
+		}
+		Config struct {
 			Image       string
 			Tty         bool
 			Labels      map[string]string
@@ -283,7 +382,10 @@ func (c *Client) Inspect(ctx context.Context, id string) (Container, error) {
 	}
 	v := Container{ID: r.ID, Name: strings.TrimPrefix(r.Name, "/"), Image: r.Config.Image, State: r.State.Status, Status: r.State.Status, StartedAt: r.State.StartedAt, TTY: r.Config.Tty}
 	v.ImageID, v.RestartCount, v.ExitCode, v.OOMKilled = r.Image, r.RestartCount, r.State.ExitCode, r.State.OOMKilled
-	v.Mounts, v.Networks = r.Mounts, networkIDs(r.NetworkSettings.Networks)
+	v.Mounts = r.Mounts
+	v.Ports = formatInspectPorts(r.NetworkSettings.Ports)
+	v.Networks = networkIDs(r.NetworkSettings.Networks)
+	v.NetworkNames = networkNames(r.NetworkSettings.Networks)
 	v.Secrets = sensitiveValues(r.Config.Env)
 	v.HasHealthCheck = r.Config.Healthcheck != nil && len(r.Config.Healthcheck.Test) > 0 && r.Config.Healthcheck.Test[0] != "NONE"
 	if r.State.Health != nil {
@@ -309,7 +411,6 @@ func (c *Client) Stats(ctx context.Context, id string) (Stats, error) {
 		SystemCPUUsage uint64
 		OnlineCPUs     uint64
 	}
-	// Docker uses snake_case for resource statistics.
 	var r struct {
 		CPU    json.RawMessage `json:"cpu_stats"`
 		Prev   json.RawMessage `json:"precpu_stats"`
@@ -364,10 +465,17 @@ func (c *Client) Stats(ctx context.Context, id string) (Stats, error) {
 }
 
 func (c *Client) Logs(ctx context.Context, container Container) (Logs, error) {
+	return c.LogsTail(ctx, container, 200)
+}
+
+func (c *Client) LogsTail(ctx context.Context, container Container, tail int) (Logs, error) {
 	if !fullID.MatchString(container.ID) {
 		return Logs{}, errors.New("invalid container ID")
 	}
-	res, err := c.request(ctx, "GET", "/v"+apiVersion+"/containers/"+container.ID+"/logs?stdout=true&stderr=true&timestamps=true&tail=200")
+	if tail <= 0 || tail > 1000 {
+		tail = 200
+	}
+	res, err := c.request(ctx, "GET", "/v"+apiVersion+"/containers/"+container.ID+"/logs?stdout=true&stderr=true&timestamps=true&tail="+strconv.Itoa(tail))
 	if err != nil {
 		return Logs{}, err
 	}
@@ -378,6 +486,64 @@ func (c *Client) Logs(ctx context.Context, container Container) (Logs, error) {
 		text, truncated = strings.ToValidUTF8(text[:MaxLogBytes], ""), true
 	}
 	return Logs{Text: text, Truncated: truncated, SampledAt: time.Now().UTC().Format(time.RFC3339)}, err
+}
+
+// ParseLogEntries structures plain timestamped Docker log lines into entries
+// with inferred severity so both single-container and multiplexed stack logs
+// filter cleanly on the client.
+func ParseLogEntries(text, service, containerName string) []LogEntry {
+	out := []LogEntry{}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		ts := ""
+		msg := line
+		if sp := strings.IndexByte(line, ' '); sp > 18 && sp < 40 && len(line) > 4 && line[4] == '-' {
+			ts = line[:sp]
+			msg = strings.TrimSpace(line[sp+1:])
+		}
+		lvl := classifyLevel(msg)
+		svc := service
+		if svc == "" {
+			svc = containerName
+		}
+		out = append(out, LogEntry{Timestamp: ts, Service: svc, Container: containerName, Level: lvl, Message: msg})
+	}
+	return out
+}
+
+var errRe = regexp.MustCompile(`(?i)\b(error|err|fatal|panic|oomkilled|sigkill|exception|failed)\b`)
+var wrnRe = regexp.MustCompile(`(?i)\b(warn|warning|wrn|deprecated|timeout|retry)\b`)
+
+func classifyLevel(msg string) string {
+	switch {
+	case errRe.MatchString(msg):
+		return "ERR"
+	case wrnRe.MatchString(msg):
+		return "WRN"
+	default:
+		return "INF"
+	}
+}
+
+// Events streams container/image/volume/network events from the Engine socket.
+func (c *Client) Events(ctx context.Context, onEvent func()) error {
+	filters := url.QueryEscape(`{"type":["container","image","volume","network"]}`)
+	res, err := c.request(ctx, "GET", "/v"+apiVersion+"/events?filters="+filters)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	sc := bufio.NewScanner(res.Body)
+	sc.Buffer(make([]byte, 16*1024), 256*1024)
+	for sc.Scan() {
+		if len(bytes.TrimSpace(sc.Bytes())) > 0 && onEvent != nil {
+			onEvent()
+		}
+	}
+	return sc.Err()
 }
 
 var ansi = regexp.MustCompile(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))`)
@@ -417,7 +583,7 @@ func ReadLogs(r io.Reader, tty bool) (string, bool, error) {
 	if truncated {
 		raw = raw[:MaxLogBytes]
 	}
-	clean := ansi.ReplaceAllString(strings.ToValidUTF8(string(raw), "�"), "")
+	clean := ansi.ReplaceAllString(strings.ToValidUTF8(string(raw), ""), "")
 	clean = strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) && r != '\n' && r != '\t' {
 			return -1

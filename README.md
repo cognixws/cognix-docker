@@ -1,66 +1,27 @@
-# picode-docker
+# cognix-docker (Docker v2 for COGNIX[WS])
 
-A [PiCode](https://github.com/cfpperche/picode) extension that shows your
-Docker containers, grouped by compose project, and starts, stops and
-restarts them — with an agent, from a workspace, or from the command
-palette. It replaces PiCode's old built-in Docker app (ADR-0230, D3): the
-same Docker Engine client, ported out to its own installable extension.
+**Docker Sysadmin** extension (`v2.0.0`, `apiVersion: 22`) for **COGNIX[WS]** — the operating platform where people and AI agents work together.
 
-> v0.2 — plan in [docs/plan.md](docs/plan.md).
+## Highlights
+
+- **Stacks & Compose lifecycle**: groups containers by Compose stack with clickable published port pills, live CPU/memory bars, multiplexed severity-filtered stack logs, and native `docker compose` validation, service diffing, and deployment inside enabled workspaces (volumes preserved).
+- **Supervised 5-minute maintenance plans**: stops, restarts, stack repairs, Compose deployments, and single-item unused resource removals create fingerprinted 5-minute plans confirmed through COGNIX[WS]'s native `confirm` dialog (`X-PiCode-Owner-Confirmed`), with deduplicated Inbox notifications when proposed by an agent.
+- **Health monitors & structured diagnosis**: 30/60/300s background stack probes with consecutive-sample hysteresis (`2/3/5` bad samples to open, `2` good samples to resolve) and fact-based `Observation → Hypothesis → Procedure` diagnosis.
+- **Portable agent capabilities (`picode-tools/1`)**: four capability groups (`inspect`, `operate`, `compose`, `maintain`), the `docker-sysadmin` skill, and the multi-CLI **Docker Sysadmin** agent template work across Claude Code, Codex, Antigravity, OpenCode, Grok, Muse Code, Omp, Pi, and Assistants.
+- **Settings ▸ Storage (`storageProvider`)**: reports unused images, build cache, and unused volumes with consumer protection so reviewed items are reclaimed one by one.
+- **Fast binary startup**: `bin/run.sh` runs a prebuilt binary when present or compiles `cmd/cognix-docker` once per source digest into `${PICODE_EXT_DATA}/bin/`.
 
 ## Install
 
-In PiCode: **Extensions → Install extension**, paste
-`https://github.com/cognixws/cognix-docker`, review, **Install**, then turn
-it on in the workspaces where you want it, or let it turn itself on: any
-workspace whose folder has a `docker-compose.yml`, `compose.yml` or
-`Dockerfile` does that on its own (you can always turn it back off).
+In COGNIX[WS]: **Extensions → Install extension**, provide this repository URL or local folder, review permissions and capabilities, and click **Install**. Workspaces containing `compose.yml`, `docker-compose.yml`, or `Dockerfile` activate it automatically unless turned off.
 
-## In PiCode
+## Development
 
-- **Two agent tools** (`docker_containers`, `docker_container`) let any
-  agent read what is running and one container's state, resources and
-  logs — no confirmation needed, since they only read. Deeper tools
-  (start/stop/restart, history, resource cleanup, health monitoring) stay
-  in PiCode's `packages/pi-sysadmin`, which keeps its own audited backend;
-  see the [Docker guide](https://github.com/cfpperche/picode/blob/main/docs-site/guide/docker.md).
-- **The Docker page** (Apps → Docker, or its tab) lists containers by
-  compose project, and a container's detail: state, health, a resource
-  sample, recent logs, and Start / Stop / Restart.
-- **Open with**: `docker-compose.yml`, `compose.yml` and `Dockerfile` in
-  PiCode's file view offer **Open in Docker**.
-- **Menu and palette**: the workspace menu and the command palette have
-  *Open Docker*.
-- **Turns itself on** in a workspace with a compose file or a Dockerfile,
-  unless you turned it off there.
-
-## Requirements
-
-- PiCode with extensions (ADR-0230).
-- A Docker Engine reachable over its Unix socket (`DOCKER_HOST`, the
-  current `docker context`, or `/var/run/docker.sock`). Never a shell, never
-  a remote (`tcp://`/`ssh://`) endpoint, never elevated privileges.
-- Go on the machine running PiCode (the extension's process runs as
-  `go run`, so it needs no separate build step).
-
-## Scope (v1)
-
-Container list, detail, logs and start/stop/restart. Not yet ported from
-the built-in app: the resource-history/health-monitor/maintenance-plans
-layer. See [docs/plan.md](docs/plan.md).
+```sh
+make test
+make build
+```
 
 ## License
 
 Apache-2.0.
-
-## In Settings ▸ Storage (0.3.0)
-
-The extension tells COGNIX[WS]'s Storage page what Docker keeps on your
-computer while the extension is on in a workspace: each image no container
-uses, the build cache, and each volume no container uses. Clean up there
-gives an item back through Docker itself, never forced. The build cache
-comes checked (a build makes it again); images and volumes come unchecked
-(one built here cannot be downloaded again, a volume holds data) and go
-only when you check them, one by one, and only if no container uses them
-at that moment. A volume names the compose or Supabase project it
-belongs to. It needs COGNIX[WS] with extension API 17.

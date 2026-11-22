@@ -1,27 +1,490 @@
 {
   "id": "docker",
   "name": "Docker",
-  "version": "0.3.0",
-  "apiVersion": 17,
-  "publisher": "PiCode",
-  "description": "See and manage your Docker containers, grouped by compose project, from PiCode.",
+  "version": "2.0.0",
+  "apiVersion": 22,
+  "publisher": "COGNIX[WS]",
+  "description": "Manage local Docker stacks and containers with your agents: Compose deploys, multiplexed logs, health monitors, diagnosis and reviewed cleanup.",
   "icon": "icons/docker.png",
-  "agent": {
-    "mcpServers": {
-      "docker": {
-        "command": "go",
-        "args": [
-          "run",
-          "${extensionDir}/mcp"
-        ]
-      }
-    }
+  "permissions": [
+    "workspaces:read",
+    "agents:read",
+    "inbox:write",
+    "events:publish"
+  ],
+  "storage": {
+    "migrations": "storage/migrations"
   },
   "process": {
-    "command": "go",
+    "command": "/bin/sh",
     "args": [
-      "run",
-      "${extensionDir}/server"
+      "${extensionDir}/bin/run.sh",
+      "server"
+    ]
+  },
+  "agent": {
+    "executor": {
+      "protocol": "picode-tools/1",
+      "command": "/bin/sh",
+      "args": [
+        "${extensionDir}/bin/run.sh",
+        "exec"
+      ]
+    },
+    "capabilities": [
+      {
+        "id": "inspect",
+        "label": "Docker inspection",
+        "description": "Read Compose stacks, container state, resource usage, redacted logs, health monitors, and open the Docker panel.",
+        "tools": [
+          {
+            "id": "containers",
+            "description": "List local Docker containers grouped by Compose stack with ports, health, and live resource metrics.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "project": {
+                  "type": "string",
+                  "description": "Optional Compose project name to filter by."
+                },
+                "state": {
+                  "type": "string",
+                  "description": "Optional container state filter such as running or exited."
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "id": "container",
+            "description": "Inspect one container by its full 64-character ID: state, health, mounts, networks, resource sample, and redacted logs.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "description": "Full 64-character hex container ID.",
+                  "minLength": 64,
+                  "maxLength": 64
+                }
+              },
+              "required": [
+                "id"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "id": "logs",
+            "description": "Read redacted, severity-classified logs for a single container ID or multiplexed across a Compose stack.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "description": "Full 64-character container ID when reading one container."
+                },
+                "project": {
+                  "type": "string",
+                  "description": "Compose stack project name when reading multiplexed stack logs."
+                },
+                "tail": {
+                  "type": "integer",
+                  "description": "Lines per container (1 to 400).",
+                  "minimum": 1,
+                  "maximum": 400
+                },
+                "level": {
+                  "type": "string",
+                  "description": "Optional severity filter.",
+                  "enum": [
+                    "INF",
+                    "WRN",
+                    "ERR"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "id": "resources",
+            "description": "List local Docker images, volumes, and custom networks with active and stopped container consumers and reclaimable size.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "description": "Optional resource kind.",
+                  "enum": [
+                    "image",
+                    "volume",
+                    "network"
+                  ]
+                },
+                "unusedOnly": {
+                  "type": "boolean",
+                  "description": "Only return unused resources eligible for single-item removal."
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "id": "health",
+            "description": "Read configured stack health monitors and open incidents, or sample one project immediately.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "project": {
+                  "type": "string",
+                  "description": "Optional Compose stack name to sample right now."
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "id": "open-panel",
+            "description": "Open the Docker panel beside the current agent session.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "project": {
+                  "type": "string",
+                  "description": "Optional stack name context."
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        ]
+      },
+      {
+        "id": "operate",
+        "label": "Container operations",
+        "description": "Start stopped containers with target locking and verification, or propose 5-minute stop/restart plans for owner confirmation.",
+        "tools": [
+          {
+            "id": "manage",
+            "description": "Start a stopped container immediately, or create a 5-minute approval plan to stop or restart a container.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "description": "Full 64-character hex container ID.",
+                  "minLength": 64,
+                  "maxLength": 64
+                },
+                "action": {
+                  "type": "string",
+                  "description": "Lifecycle action.",
+                  "enum": [
+                    "start",
+                    "stop",
+                    "restart"
+                  ]
+                },
+                "requestKey": {
+                  "type": "string",
+                  "description": "Optional idempotency key for start.",
+                  "maxLength": 80
+                }
+              },
+              "required": [
+                "id",
+                "action"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "id": "history",
+            "description": "List audited container operations, maintenance jobs, and pending 5-minute plans.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "limit": {
+                  "type": "integer",
+                  "description": "Maximum operations to return (1 to 100).",
+                  "minimum": 1,
+                  "maximum": 100
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        ]
+      },
+      {
+        "id": "compose",
+        "label": "Docker Compose stacks",
+        "description": "Validate workspace Compose files, preview service diffs against live containers, and propose supervised stack deployments.",
+        "tools": [
+          {
+            "id": "compose-preview",
+            "description": "Validate a Compose folder inside an enabled workspace and diff its services against running containers.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "workDir": {
+                  "type": "string",
+                  "description": "Workspace folder containing the Compose file. Defaults to your current working directory."
+                },
+                "project": {
+                  "type": "string",
+                  "description": "Optional Compose project name."
+                },
+                "files": {
+                  "type": "array",
+                  "description": "Optional relative Compose file names.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 8
+                },
+                "profiles": {
+                  "type": "array",
+                  "description": "Optional Compose profiles.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 8
+                },
+                "register": {
+                  "type": "boolean",
+                  "description": "Save this Compose stack in the Docker extension inventory when valid."
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "id": "compose-deploy",
+            "description": "Create a 5-minute Compose deployment plan (docker compose up -d, volumes preserved) and notify the owner to confirm.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "workDir": {
+                  "type": "string",
+                  "description": "Workspace folder containing the Compose file. Defaults to your current working directory."
+                },
+                "project": {
+                  "type": "string",
+                  "description": "Optional Compose project name."
+                },
+                "files": {
+                  "type": "array",
+                  "description": "Optional relative Compose file names.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 8
+                },
+                "profiles": {
+                  "type": "array",
+                  "description": "Optional Compose profiles.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 8
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        ]
+      },
+      {
+        "id": "maintain",
+        "label": "Sysadmin maintenance",
+        "description": "Diagnose unhealthy stacks, configure health monitors, preview 5-minute repair or cleanup plans, and request owner approval.",
+        "tools": [
+          {
+            "id": "diagnose",
+            "description": "Inspect every container in a stack and return structured Observation, Hypothesis, and Procedure findings.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "project": {
+                  "type": "string",
+                  "description": "Compose stack project name, or empty string for standalone containers."
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "id": "plan",
+            "description": "Create a 5-minute maintenance plan with preflight fingerprints for a stack action, repair procedure, or single unused resource removal.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "description": "Plan category.",
+                  "enum": [
+                    "project",
+                    "procedure",
+                    "resource"
+                  ]
+                },
+                "project": {
+                  "type": "string",
+                  "description": "Compose stack name (or empty string for standalone containers)."
+                },
+                "action": {
+                  "type": "string",
+                  "description": "For kind=project: start, stop, or restart.",
+                  "enum": [
+                    "start",
+                    "stop",
+                    "restart"
+                  ]
+                },
+                "procedure": {
+                  "type": "string",
+                  "description": "For kind=procedure: supervised repair routine.",
+                  "enum": [
+                    "restart-unhealthy",
+                    "start-stopped",
+                    "restart-high-memory"
+                  ]
+                },
+                "resourceKind": {
+                  "type": "string",
+                  "description": "For kind=resource: image, volume, or network.",
+                  "enum": [
+                    "image",
+                    "volume",
+                    "network"
+                  ]
+                },
+                "resourceId": {
+                  "type": "string",
+                  "description": "Exact image sha256 ID, volume name, or 64-char network ID."
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "id": "execute-plan",
+            "description": "Queue an unexpired 5-minute plan for owner confirmation in Docker > Plans and file one deduplicated Inbox review.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "planId": {
+                  "type": "string",
+                  "description": "Plan ID returned by plan.",
+                  "minLength": 3,
+                  "maxLength": 80
+                }
+              },
+              "required": [
+                "planId"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "id": "jobs",
+            "description": "Read the outcome of a maintenance job or list recent jobs.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "jobId": {
+                  "type": "string",
+                  "description": "Optional job ID."
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "id": "monitors",
+            "description": "List, sample, or configure periodic stack health monitors and incident hysteresis.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "description": "Monitor verb.",
+                  "enum": [
+                    "list",
+                    "check",
+                    "configure"
+                  ]
+                },
+                "project": {
+                  "type": "string",
+                  "description": "Compose stack project name (empty string for standalone containers)."
+                },
+                "enabled": {
+                  "type": "boolean",
+                  "description": "Enable or pause periodic monitoring."
+                },
+                "intervalSeconds": {
+                  "type": "integer",
+                  "description": "Sampling interval: 30, 60, or 300 seconds.",
+                  "enum": [
+                    30,
+                    60,
+                    300
+                  ]
+                },
+                "cpuPercent": {
+                  "type": "integer",
+                  "description": "CPU alert threshold: 80, 90, or 200.",
+                  "enum": [
+                    80,
+                    90,
+                    200
+                  ]
+                },
+                "memoryPercent": {
+                  "type": "integer",
+                  "description": "Memory alert threshold: 80, 85, or 95.",
+                  "enum": [
+                    80,
+                    85,
+                    95
+                  ]
+                },
+                "badSamples": {
+                  "type": "integer",
+                  "description": "Consecutive bad samples before opening an incident: 2, 3, or 5.",
+                  "enum": [
+                    2,
+                    3,
+                    5
+                  ]
+                },
+                "retentionDays": {
+                  "type": "integer",
+                  "description": "Resolved incident retention: 7 or 30 days.",
+                  "enum": [
+                    7,
+                    30
+                  ]
+                },
+                "revision": {
+                  "type": "integer",
+                  "description": "Optional optimistic concurrency revision."
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        ]
+      }
+    ],
+    "skills": [
+      "skills/docker-sysadmin"
     ]
   },
   "ui": {
@@ -31,9 +494,66 @@
         "title": "Docker",
         "path": "ui/containers.html"
       }
+    ],
+    "places": [
+      "agent",
+      "inbox",
+      "settings"
     ]
   },
   "contributes": {
+    "workspace": {
+      "title": "Docker",
+      "page": "containers"
+    },
+    "panels": [
+      {
+        "id": "docker",
+        "title": "Docker",
+        "page": "containers"
+      }
+    ],
+    "dockPanels": [
+      {
+        "id": "docker-dock",
+        "title": "Docker",
+        "page": "containers"
+      }
+    ],
+    "templates": [
+      {
+        "path": "templates/sysadmin"
+      }
+    ],
+    "guides": [
+      {
+        "id": "docker-sysadmin",
+        "title": "Operate Docker stacks safely",
+        "summary": "Inspect Compose stacks, stream logs, monitor health, and approve 5-minute maintenance plans.",
+        "steps": [
+          {
+            "title": "Inspect stacks and live logs",
+            "body": "Open Stacks to see Compose projects, published ports, CPU and memory bars, and click any container or stack to open the Inspector drawer with severity-filtered logs.",
+            "page": "containers"
+          },
+          {
+            "title": "Reconcile Compose projects",
+            "body": "Open a compose.yml file with Open in Docker or click Compose stack to validate services, preview image and port diffs, and deploy while keeping volumes intact.",
+            "page": "containers"
+          },
+          {
+            "title": "Monitor health and diagnose",
+            "body": "Enable periodic monitors in Health with multi-sample hysteresis so transient spikes stay quiet, and run Diagnose for structured Observation and Hypothesis findings.",
+            "page": "containers"
+          },
+          {
+            "title": "Approve 5-minute plans",
+            "body": "Destructive or multi-step changes from you or any agent create a 5-minute fingerprinted plan in Plans and use COGNIX[WS]'s native confirmation dialog before executing.",
+            "page": "containers"
+          }
+        ]
+      }
+    ],
     "commands": [
       {
         "id": "open-containers",
@@ -48,7 +568,17 @@
         "title": "Open in Docker"
       },
       {
+        "pattern": "docker-compose.yaml",
+        "page": "containers",
+        "title": "Open in Docker"
+      },
+      {
         "pattern": "compose.yml",
+        "page": "containers",
+        "title": "Open in Docker"
+      },
+      {
+        "pattern": "compose.yaml",
         "page": "containers",
         "title": "Open in Docker"
       },
@@ -61,13 +591,18 @@
     "menus": {
       "workspace": [
         "open-containers"
+      ],
+      "agent": [
+        "open-containers"
       ]
     }
   },
   "activation": {
     "files": [
       "docker-compose.yml",
+      "docker-compose.yaml",
       "compose.yml",
+      "compose.yaml",
       "Dockerfile"
     ]
   },
