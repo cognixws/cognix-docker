@@ -1,3 +1,6 @@
 /bin/cognix-docker*
+!/bin/cognix-docker-Linux-x86_64
+!/bin/cognix-docker-Linux-aarch64
 *.test
 *.out
+/.release-check/

@@ -1,6 +1,8 @@
 #!/bin/sh
-# Runs the prebuilt cognix-docker binary when shipped, else builds once per
-# source digest into the extension's cache dir (never go run on every start).
+# Runs the prebuilt cognix-docker binary this package ships for the
+# computer (Linux x86_64 and aarch64), else builds once per source digest
+# into the extension's cache dir (never go run on every start). A computer
+# without either gets one line saying so: a COGNIX[WS] install has no Go.
 set -eu
 
 EXT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -10,6 +12,11 @@ PREBUILT="${EXT_DIR}/bin/cognix-docker-${OS}-${ARCH}"
 
 if [ -x "${PREBUILT}" ]; then
   exec "${PREBUILT}" "$@"
+fi
+
+if ! command -v go >/dev/null 2>&1; then
+  echo "cognix-docker: no prebuilt binary for ${OS}-${ARCH} in this package, and no Go to build one." >&2
+  exit 1
 fi
 
 CACHE_BASE="${PICODE_EXT_DATA:-${XDG_CACHE_HOME:-${HOME}/.cache}/cognix-docker}"

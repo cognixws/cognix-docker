@@ -65,6 +65,8 @@
         await new Promise((res) => setTimeout(res, 650));
         return api(path, body, attempt + 1);
       }
+      // No answer from the extension's own process (not an error it sent).
+      if (err && typeof err === "object") err.transport = true;
       throw err;
     }
     let data = {};
@@ -184,7 +186,7 @@
       else if (navigator.clipboard) await navigator.clipboard.writeText(text);
       showToast(label);
     } catch {
-      showToast("Copy unavailable here.");
+      showToast("Couldn't copy here. Select the command and copy it.");
     }
   }
 
@@ -227,13 +229,45 @@
     else if (S.view === "plans") drawPlansView(main, ov);
   }
 
-  function drawStacksView(main, ov) {
-    if (!ov || !ov.reachable) {
-      main.innerHTML = `<div class="dk-state-box">
-        <h3>Cannot reach Docker on this computer</h3>
-        <p>${esc((ov && ov.error) || "Docker is stopped or this account lacks permission to connect, so start Docker and check again.")}</p>
+  // Docker cannot be used: which case (the server's problem, the same table
+  // as COGNIX[WS]'s Software row), one sentence and one action. A helper
+  // that did not start is its own case: Docker was never asked.
+  function notUsableBox(ov) {
+    const p = ov && ov.problem;
+    if (ov && ov.helperFailed) {
+      return `<div class="dk-state-box" role="alert">
+        <h3>The Docker extension didn't start</h3>
+        <p title="${esc(ov.error || "")}">Its background process didn't answer, so Docker wasn't checked. Restart the extension from its settings.</p>
+        ${placesDoor
+          ? `<button class="dk-btn is-primary" type="button" data-act="open-ext-settings">Open settings</button>`
+          : `<button class="dk-btn is-primary" type="button" data-act="retry">Check again</button>`}
+      </div>`;
+    }
+    if (!p) {
+      return `<div class="dk-state-box" role="alert">
+        <h3>Docker doesn't answer</h3>
+        <p>${esc((ov && ov.error) || "Docker didn't answer on this computer.")}</p>
         <button class="dk-btn is-primary" type="button" data-act="retry">Check again</button>
       </div>`;
+    }
+    // After the command is copied, the one action is Check again.
+    const cmd = p.action && p.action.kind === "copy" ? p.action.command : "";
+    const copy = cmd && S.copiedFix !== cmd;
+    return `<div class="dk-state-box" role="alert" data-state="${esc(p.state)}">
+      <h3>${esc(p.title)}</h3>
+      <p>${esc(p.sentence)}</p>
+      ${cmd ? `<code class="dk-cmd">${esc(cmd)}</code>` : ""}
+      ${copy
+        ? `<button class="dk-btn is-primary" type="button" data-act="copy-fix" data-cmd="${esc(cmd)}">${esc(p.action.label)}</button>`
+        : p.action && p.action.kind === "link" && p.action.url && linksDoor
+          ? `<button class="dk-btn is-primary" type="button" data-act="open-fix" data-url="${esc(p.action.url)}">${esc(p.action.label)}</button>`
+          : `<button class="dk-btn is-primary" type="button" data-act="retry">Check again</button>`}
+    </div>`;
+  }
+
+  function drawStacksView(main, ov) {
+    if (!ov || !ov.reachable) {
+      main.innerHTML = notUsableBox(ov);
       return;
     }
 
@@ -417,11 +451,7 @@
 
   function drawHealthView(main, ov) {
     if (!ov || !ov.reachable) {
-      main.innerHTML = `<div class="dk-state-box">
-        <h3>Cannot reach Docker on this computer</h3>
-        <p>${esc((ov && ov.error) || "Docker is stopped or this account lacks permission to connect, so start Docker and check again.")}</p>
-        <button class="dk-btn is-primary" type="button" data-act="retry">Check again</button>
-      </div>`;
+      main.innerHTML = notUsableBox(ov);
       return;
     }
 
@@ -481,11 +511,7 @@
 
   function drawResourcesView(main, ov) {
     if (!ov || !ov.reachable) {
-      main.innerHTML = `<div class="dk-state-box">
-        <h3>Cannot reach Docker on this computer</h3>
-        <p>${esc((ov && ov.error) || "Docker is stopped or this account lacks permission to connect, so start Docker and check again.")}</p>
-        <button class="dk-btn is-primary" type="button" data-act="retry">Check again</button>
-      </div>`;
+      main.innerHTML = notUsableBox(ov);
       return;
     }
 
@@ -785,7 +811,9 @@
         }
       }
     } catch (e) {
-      S.overview = { reachable: false, error: e.message, groups: [], openIncidents: [], pendingPlans: [] };
+      // A transport error means the extension's own process did not
+      // answer; an error it sent back (a store error) is not "didn't start".
+      S.overview = { reachable: false, helperFailed: !!(e && e.transport), error: e.message, groups: [], openIncidents: [], pendingPlans: [] };
     } finally {
       S.loading = false;
       drawMain();
@@ -912,7 +940,14 @@
       return;
     }
     if (act === "clear-filters") { S.search = ""; S.filter = "all"; drawMain(); return; }
-    if (act === "retry") { await refreshAll(true); return; }
+    if (act === "retry") {
+      actEl.disabled = true;
+      actEl.textContent = "Checking…";
+      await refreshAll(true);
+      return;
+    }
+    if (act === "open-fix") { await linksDoor.open(actEl.dataset.url || ""); return; }
+    if (act === "copy-fix") { await copyText(actEl.dataset.cmd || "", "Copied. Run it in a COGNIX[WS] terminal, then check again."); S.copiedFix = actEl.dataset.cmd || ""; drawMain(); return; }
     if (act === "go-plans") { switchView("plans"); return; }
     if (act === "go-stacks") { switchView("stacks"); return; }
     if (act === "open-ext-settings" && placesDoor) { await placesDoor.settings(); return; }

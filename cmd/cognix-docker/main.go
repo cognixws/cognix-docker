@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cfpperche/picode-docker/engine"
 	"github.com/cfpperche/picode-docker/server"
 	"github.com/cfpperche/picode-docker/sysadmin"
 )
@@ -33,6 +34,11 @@ type processBeacon struct {
 }
 
 func main() {
+	// The docker this process runs (docker compose) is the one the
+	// diagnosis looked up: the same search path, ~/bin and the system
+	// folders a systemd service's PATH lacks included.
+	home, _ := os.UserHomeDir()
+	_ = os.Setenv("PATH", engine.SearchPath(os.Getenv("PATH"), home))
 	mode := "server"
 	if len(os.Args) > 1 {
 		mode = os.Args[1]

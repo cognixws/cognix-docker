@@ -51,18 +51,6 @@ func ValidAction(action, state string) bool {
 	return false
 }
 
-func Connect(ctx context.Context) (*Client, error) {
-	c, err := LocalClient(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if err := c.Check(ctx); err != nil {
-		c.Close()
-		return nil, err
-	}
-	return c, nil
-}
-
 // Detail is one container's state, mounts/networks, a resource sample and recent logs.
 type Detail struct {
 	Row

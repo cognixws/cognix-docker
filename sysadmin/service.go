@@ -303,9 +303,12 @@ type StackGroup struct {
 }
 
 type OverviewResponse struct {
-	Reachable         bool                  `json:"reachable"`
-	Endpoint          string                `json:"endpoint,omitempty"`
-	Error             string                `json:"error,omitempty"`
+	Reachable bool   `json:"reachable"`
+	Endpoint  string `json:"endpoint,omitempty"`
+	Error     string `json:"error,omitempty"`
+	// Problem says which case it is when Docker cannot be used, with its
+	// one action (engine.ProblemOf).
+	Problem           *engine.Problem       `json:"problem,omitempty"`
 	TotalContainers   int                   `json:"totalContainers"`
 	RunningContainers int                   `json:"runningContainers"`
 	Groups            []StackGroup          `json:"groups"`
@@ -333,6 +336,11 @@ func (s *Service) Overview(ctx context.Context, openPath string, includeStats bo
 	if err != nil {
 		out.Reachable = false
 		out.Error = humanizeDockerError(err)
+		var nr *engine.NotReadyError
+		if errors.As(err, &nr) {
+			p := engine.ProblemOf(nr.Diagnosis)
+			out.Problem = &p
+		}
 		return out, nil
 	}
 	defer c.Close()
@@ -474,6 +482,10 @@ func (s *Service) Overview(ctx context.Context, openPath string, includeStats bo
 func humanizeDockerError(err error) string {
 	if err == nil {
 		return ""
+	}
+	var nr *engine.NotReadyError
+	if errors.As(err, &nr) {
+		return nr.Error() // already says which case
 	}
 	msg := err.Error()
 	lower := strings.ToLower(msg)

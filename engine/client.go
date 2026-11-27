@@ -1,7 +1,7 @@
 // Package engine talks to the Docker Engine's own HTTP API over its Unix
-// socket. It never executes a shell (except to ask an installed `docker`
-// CLI which context is selected, purely to resolve the socket path) and
-// never elevates privileges.
+// socket. It never executes a shell (it only asks an installed `docker`
+// CLI which context is selected, and `wslpath` which WSL distribution this
+// is, to resolve and explain the connection) and never elevates privileges.
 package engine
 
 import (
@@ -16,8 +16,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -147,30 +145,6 @@ func EndpointFrom(env func(string) string, contextHost func() (string, error)) (
 	return "unix://" + filepath.Clean(u.Path), nil
 }
 
-func LocalClient(ctx context.Context) (*Client, error) {
-	endpoint, err := EndpointFrom(os.Getenv, func() (string, error) {
-		if _, err := exec.LookPath("docker"); err != nil {
-			return "unix:///var/run/docker.sock", nil
-		}
-		cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(cctx, "docker", "context", "inspect", "--format", "{{json .Endpoints.docker.Host}}")
-		out, err := cmd.Output()
-		if err != nil {
-			return "", errors.New("Docker's connection could not be resolved: check the selected Docker context")
-		}
-		var endpoint string
-		if err = json.Unmarshal(out, &endpoint); err != nil {
-			return "", errors.New("Docker returned an invalid connection")
-		}
-		return endpoint, nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return NewClient(endpoint)
-}
-
 func NewClient(endpoint string) (*Client, error) {
 	endpoint, err := EndpointFrom(func(k string) string {
 		if k == "PICODE_DOCKER_HOST" {
@@ -230,6 +204,14 @@ func (c *Client) Check(ctx context.Context) error {
 	if err := c.get(ctx, "/version", &v); err != nil {
 		return err
 	}
+	if !apiCompatible(v.APIVersion, v.MinAPIVersion) {
+		return errors.New("this Docker API version is incompatible with this extension (requires API 1.44)")
+	}
+	return nil
+}
+
+// apiCompatible says an engine reporting these versions speaks API 1.44.
+func apiCompatible(version, min string) bool {
 	parse := func(v string) int {
 		var a, b int
 		if _, err := fmt.Sscanf(v, "%d.%d", &a, &b); err != nil {
@@ -237,10 +219,11 @@ func (c *Client) Check(ctx context.Context) error {
 		}
 		return a*1000 + b
 	}
-	if parse(v.APIVersion) < parse(apiVersion) || (v.MinAPIVersion != "" && parse(v.MinAPIVersion) > parse(apiVersion)) {
-		return errors.New("this Docker API version is incompatible with this extension (requires API 1.44)")
-	}
-	return nil
+	return parse(version) >= parse(apiVersion) && (min == "" || parse(min) <= parse(apiVersion))
+}
+
+func decodeJSON(res *http.Response, out any) error {
+	return json.NewDecoder(io.LimitReader(res.Body, 4*1024*1024)).Decode(out)
 }
 
 func labels(c *Container, l map[string]string) {
