@@ -251,14 +251,15 @@
       </div>`;
     }
     // After the command is copied, the one action is Check again.
-    const copy = p.action && p.action.kind === "copy" && S.copiedFix !== p.action.command;
+    const cmd = p.action && p.action.kind === "copy" ? p.action.command : "";
+    const copy = cmd && S.copiedFix !== cmd;
     return `<div class="dk-state-box" role="alert" data-state="${esc(p.state)}">
       <h3>${esc(p.title)}</h3>
       <p>${esc(p.sentence)}</p>
-      ${copy ? `<code class="dk-cmd">${esc(p.action.command)}</code>` : ""}
+      ${cmd ? `<code class="dk-cmd">${esc(cmd)}</code>` : ""}
       ${copy
-        ? `<button class="dk-btn is-primary" type="button" data-act="copy-fix" data-cmd="${esc(p.action.command)}">${esc(p.action.label)}</button>`
-        : `<button class="dk-btn is-primary" type="button" data-act="retry">${esc((p.action && p.action.label) || "Check again")}</button>`}
+        ? `<button class="dk-btn is-primary" type="button" data-act="copy-fix" data-cmd="${esc(cmd)}">${esc(p.action.label)}</button>`
+        : `<button class="dk-btn is-primary" type="button" data-act="retry">Check again</button>`}
     </div>`;
   }
 
