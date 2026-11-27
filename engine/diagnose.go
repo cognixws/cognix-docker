@@ -85,6 +85,12 @@ type Diagnosis struct {
 	// installed is a rootless one only. Both pick the start command.
 	Systemd  bool `json:"systemd"`
 	Rootless bool `json:"rootless,omitempty"`
+	// RootlessUp: a rootless engine's socket is there (looked at, never
+	// connected to) while the docker command uses the default socket: it
+	// runs and is not selected.
+	RootlessUp bool `json:"rootlessUp,omitempty"`
+	// ContextUnreadable: the selected context could not be read.
+	ContextUnreadable bool `json:"contextUnreadable,omitempty"`
 	// Detail is the engine's own error, for a log or a tooltip.
 	Detail string `json:"detail,omitempty"`
 }
@@ -113,6 +119,7 @@ type System struct {
 	// with a compatible API.
 	Ping   func(ctx context.Context, path string) error
 	Distro func(ctx context.Context) string
+	UID    int
 }
 
 // ErrIncompatible is Ping's answer for an engine older than API 1.44.
@@ -167,13 +174,15 @@ func LocalSystem() System {
 		LookPath:     look,
 		Ping:         pingSocket,
 		Distro:       wslDistro,
+		UID:          os.Getuid(),
 	}
 	sys.ContextHost = func(ctx context.Context) (string, error) {
 		cli, err := look("docker")
 		if err != nil || sys.onWindowsDrive(cli) {
 			return "", errNoContext
 		}
-		cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		// A cold WSL can take seconds to start a process.
+		cctx, cancel := context.WithTimeout(ctx, 6*time.Second)
 		defer cancel()
 		out, err := exec.CommandContext(cctx, cli, "context", "inspect", "--format", "{{.Endpoints.docker.Host}}").Output()
 		if err != nil {
@@ -208,7 +217,7 @@ func Diagnose(ctx context.Context, sys System) Diagnosis {
 	host, source, err := chosenHost(ctx, sys)
 	d.Endpoint, d.Source = host, source
 	if err != nil {
-		d.State, d.Detail = StateSilent, err.Error()
+		d.State, d.Detail, d.ContextUnreadable = StateSilent, err.Error(), true
 		return d
 	}
 	path, ok := unixPath(host)
@@ -255,6 +264,11 @@ func Diagnose(ctx context.Context, sys System) Diagnosis {
 		d.State = StateStopped
 	case hasCommand(sys, "dockerd-rootless.sh"):
 		d.State, d.Rootless = StateStopped, true
+		for _, p := range rootlessSockets(sys) {
+			if fi, err := sys.Stat(p); err == nil && fi.Mode()&fs.ModeSocket != 0 {
+				d.RootlessUp = true
+			}
+		}
 	case desktopCLI || exists(sys, desktopMount) || exists(sys, desktopWindows):
 		d.State = StateDesktop
 		if sys.Distro != nil {
@@ -288,6 +302,19 @@ func chosenHost(ctx context.Context, sys System) (host, source string, err error
 		}
 	}
 	return "unix://" + defaultSocket, SourceDefault, nil
+}
+
+// rootlessSockets is where a rootless engine listens; a systemd service
+// has no XDG_RUNTIME_DIR, so /run/user/<uid> is looked at too.
+func rootlessSockets(sys System) []string {
+	out := []string{}
+	if x := strings.TrimSpace(sys.Getenv("XDG_RUNTIME_DIR")); filepath.IsAbs(x) {
+		out = append(out, filepath.Join(x, "docker.sock"))
+	}
+	if sys.UID > 0 {
+		out = append(out, fmt.Sprintf("/run/user/%d/docker.sock", sys.UID))
+	}
+	return out
 }
 
 func unixPath(endpoint string) (string, bool) {

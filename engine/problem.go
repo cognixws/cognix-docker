@@ -48,16 +48,23 @@ func ProblemOf(d Diagnosis) Problem {
 	chosen := d.Source != "" && d.Source != SourceDefault
 	switch d.State {
 	case StateStopped:
-		cmd := "sudo service docker start"
-		if d.Rootless {
-			// Used only through its context: start it and switch.
-			cmd = "systemctl --user start docker && docker context use rootless"
-		} else if d.Systemd {
-			cmd = "sudo systemctl start docker"
-		}
 		p.Title = "Docker is installed but not running"
 		p.Sentence = "Start it with this command in a COGNIX[WS] terminal, then check again."
-		p.Action = copyCmd(cmd)
+		switch {
+		case d.Rootless && d.RootlessUp:
+			// Used only through its context.
+			p.Title = "Rootless Docker isn't selected"
+			p.Sentence = "It is running, but the docker command doesn't use it. Switch to it with this command, then check again."
+			p.Action = copyCmd("docker context use rootless")
+		case d.Rootless && d.Systemd:
+			p.Action = copyCmd("systemctl --user start docker && docker context use rootless")
+		case d.Rootless:
+			p.Action = copyCmd("nohup dockerd-rootless.sh >/dev/null 2>&1 & docker context use rootless")
+		case d.Systemd:
+			p.Action = copyCmd("sudo systemctl start docker")
+		default:
+			p.Action = copyCmd("sudo service docker start")
+		}
 	case StateDesktop:
 		p.Title = "Docker Desktop is installed but not connected to COGNIX[WS]"
 		if d.Distro != "" {
@@ -93,7 +100,10 @@ func ProblemOf(d Diagnosis) Problem {
 	default:
 		p.State = StateSilent
 		p.Title = "Docker doesn't answer"
-		if chosen {
+		if d.ContextUnreadable {
+			p.Sentence = "Docker's selected context can't be read, so the docker command fails too. Switch back to the default with this command."
+			p.Action = copyCmd("docker context use default")
+		} else if chosen {
 			p.Sentence = fmt.Sprintf("The connection Docker is set to use, %s, doesn't answer. Start that engine, then check again.", d.Endpoint)
 		} else {
 			p.Sentence = "Docker's connection is there but doesn't answer. Restart Docker, then check again."

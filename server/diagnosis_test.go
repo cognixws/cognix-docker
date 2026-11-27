@@ -36,9 +36,12 @@ func TestOverviewSaysWhichCase(t *testing.T) {
 		{engine.Diagnosis{State: engine.StateAbsent, Source: "default"}, "Docker isn't installed", "recheck", "", "Software"},
 		{engine.Diagnosis{State: engine.StateIncompatible, Source: "default"}, "This Docker is too old", "recheck", "", "Docker 25"},
 		{engine.Diagnosis{State: engine.StateSilent, Source: "default"}, "Docker doesn't answer", "recheck", "", "Restart Docker"},
+		{engine.Diagnosis{State: engine.StateSilent, Source: "context", ContextUnreadable: true}, "Docker doesn't answer", "copy", "docker context use default", "can't be read"},
+		{engine.Diagnosis{State: engine.StateStopped, Rootless: true, RootlessUp: true, Source: "default"}, "Rootless Docker isn't selected", "copy", "docker context use rootless", "doesn't use it"},
+		{engine.Diagnosis{State: engine.StateStopped, Rootless: true, Source: "default"}, "Docker is installed but not running", "copy", "nohup dockerd-rootless.sh >/dev/null 2>&1 & docker context use rootless", "Start it"},
 		{engine.Diagnosis{State: engine.StateSilent, Endpoint: "unix:///tmp/gone.sock", Source: "env"}, "Docker doesn't answer", "recheck", "", "/tmp/gone.sock"},
 	} {
-		t.Run(string(tc.d.State)+"/"+tc.d.Source, func(t *testing.T) {
+		t.Run(string(tc.d.State)+"/"+tc.d.Source+"/"+tc.title, func(t *testing.T) {
 			st, err := sysadmin.OpenStore(filepath.Join(t.TempDir(), "data.db"))
 			if err != nil {
 				t.Fatal(err)

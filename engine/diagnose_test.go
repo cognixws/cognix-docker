@@ -82,6 +82,7 @@ func (f fakeSystem) sys() System {
 			return syscall.ECONNREFUSED
 		},
 		Distro: func(context.Context) string { return "COGNIX" },
+		UID:    1000,
 	}
 }
 
@@ -99,6 +100,10 @@ func TestDiagnose(t *testing.T) {
 		source   string
 		rootless bool
 	}{
+		{"a rootless engine runs but the docker command uses the default socket",
+			fakeSystem{env: map[string]string{"XDG_RUNTIME_DIR": "/run/user/1000"}, path: map[string]string{"docker": "/usr/bin/docker", "dockerd-rootless.sh": "/usr/bin/dockerd-rootless.sh"},
+				files: map[string]fs.FileMode{"/run/user/1000/docker.sock": sock}},
+			StateStopped, SourceDefault, true},
 		{"engine answers on the default socket",
 			fakeSystem{path: native, files: up, engines: map[string]error{"/var/run/docker.sock": nil}},
 			StateReady, SourceDefault, false},
@@ -184,6 +189,12 @@ func TestDiagnose(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := Diagnose(context.Background(), tc.f.sys())
+			if (got.State == StateSilent && tc.source == SourceContext && tc.f.ctxErr != nil) != got.ContextUnreadable {
+				t.Fatalf("contextUnreadable = %v", got.ContextUnreadable)
+			}
+			if got.RootlessUp != (got.Rootless && len(tc.f.files) > 0 && tc.f.files["/run/user/1000/docker.sock"] != 0) {
+				t.Fatalf("rootlessUp = %v", got.RootlessUp)
+			}
 			if got.State != tc.want || got.Source != tc.source || got.Rootless != tc.rootless {
 				t.Fatalf("got %s/%s rootless=%v, want %s/%s rootless=%v (%s)", got.State, got.Source, got.Rootless, tc.want, tc.source, tc.rootless, got.Detail)
 			}
