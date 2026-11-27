@@ -235,7 +235,7 @@
     if (ov && ov.helperFailed) {
       return `<div class="dk-state-box" role="alert">
         <h3>The Docker extension didn't start</h3>
-        <p title="${esc(ov.error || "")}">Its helper didn't answer, so Docker wasn't checked. Restart the extension from its settings.</p>
+        <p title="${esc(ov.error || "")}">Its background process didn't answer, so Docker wasn't checked. Restart the extension from its settings.</p>
         ${placesDoor
           ? `<button class="dk-btn is-primary" type="button" data-act="open-ext-settings">Open settings</button>`
           : `<button class="dk-btn is-primary" type="button" data-act="retry">Check again</button>`}

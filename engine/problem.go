@@ -58,7 +58,7 @@ func ProblemOf(d Diagnosis) Problem {
 		}
 	case StateDenied:
 		p.Title = "No permission to use Docker"
-		p.Sentence = "Docker is running, but this account isn't allowed to use it. Give access from COGNIX[WS]'s Software page (Docker Engine), then check again."
+		p.Sentence = "Docker is running, but this account isn't allowed to use it. In the COGNIX[WS] app, open Software › Docker Engine and choose Give access, then check again."
 	case StateRemote:
 		p.Title = "Docker points to another computer"
 		p.Sentence = fmt.Sprintf("Docker is set to reach %s, and this extension only manages Docker on this computer. Switch back with this command.", d.Endpoint)
