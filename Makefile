@@ -22,7 +22,7 @@ check-release:
 	rm -f .release-check/x86_64 .release-check/aarch64
 	@echo "release binaries match the source"
 
-test:
+test: check-release
 	go test -race ./...
 
 clean:

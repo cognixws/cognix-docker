@@ -23,10 +23,14 @@ type Problem struct {
 // Action is the one thing the panel offers: copy a command, or check again
 // after a step the person takes elsewhere.
 type Action struct {
-	Kind    string `json:"kind"` // copy | recheck
+	Kind    string `json:"kind"` // copy | recheck | link
 	Label   string `json:"label"`
 	Command string `json:"command,omitempty"`
+	URL     string `json:"url,omitempty"`
 }
+
+// InstallURL is Docker's own install guide.
+const InstallURL = "https://docs.docker.com/engine/install/"
 
 // NotReadyError is Connect's answer when Diagnose found no usable engine.
 type NotReadyError struct{ Diagnosis Diagnosis }
@@ -46,7 +50,8 @@ func ProblemOf(d Diagnosis) Problem {
 	case StateStopped:
 		cmd := "sudo service docker start"
 		if d.Rootless {
-			cmd = "systemctl --user start docker"
+			// Used only through its context: start it and switch.
+			cmd = "systemctl --user start docker && docker context use rootless"
 		} else if d.Systemd {
 			cmd = "sudo systemctl start docker"
 		}
@@ -77,7 +82,8 @@ func ProblemOf(d Diagnosis) Problem {
 		}
 	case StateNoEngine:
 		p.Title = "Docker's engine isn't installed"
-		p.Sentence = "Only the docker command is here. Install Docker Engine from COGNIX[WS]'s Software page, then check again."
+		p.Sentence = "Only the docker command is here, not the engine that runs containers. Docker's install guide shows how to add it."
+		p.Action = Action{Kind: "link", Label: "How to install", URL: InstallURL}
 	case StateAbsent:
 		p.Title = "Docker isn't installed"
 		p.Sentence = "Install Docker Engine from COGNIX[WS]'s Software page, or Docker Desktop on Windows, then check again."
@@ -103,7 +109,7 @@ var connectCache = &Cache{TTL: 2 * time.Second}
 func Connect(ctx context.Context) (*Client, error) {
 	// Kept two seconds: the panel reads several routes at once, and the
 	// engine watcher retries every few seconds while Docker is down.
-	d := connectCache.Get("", func() Diagnosis { return Diagnose(ctx, LocalSystem(nil)) })
+	d := connectCache.Get(ctx, "", func(ctx context.Context) Diagnosis { return Diagnose(ctx, LocalSystem()) })
 	if d.State != StateReady {
 		return nil, &NotReadyError{Diagnosis: d}
 	}

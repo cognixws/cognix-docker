@@ -259,7 +259,9 @@
       ${cmd ? `<code class="dk-cmd">${esc(cmd)}</code>` : ""}
       ${copy
         ? `<button class="dk-btn is-primary" type="button" data-act="copy-fix" data-cmd="${esc(cmd)}">${esc(p.action.label)}</button>`
-        : `<button class="dk-btn is-primary" type="button" data-act="retry">Check again</button>`}
+        : p.action && p.action.kind === "link" && p.action.url && linksDoor
+          ? `<button class="dk-btn is-primary" type="button" data-act="open-fix" data-url="${esc(p.action.url)}">${esc(p.action.label)}</button>`
+          : `<button class="dk-btn is-primary" type="button" data-act="retry">Check again</button>`}
     </div>`;
   }
 
@@ -944,6 +946,7 @@
       await refreshAll(true);
       return;
     }
+    if (act === "open-fix") { await linksDoor.open(actEl.dataset.url || ""); return; }
     if (act === "copy-fix") { await copyText(actEl.dataset.cmd || "", "Copied. Run it in a COGNIX[WS] terminal, then check again."); S.copiedFix = actEl.dataset.cmd || ""; drawMain(); return; }
     if (act === "go-plans") { switchView("plans"); return; }
     if (act === "go-stacks") { switchView("stacks"); return; }

@@ -2,6 +2,9 @@ module github.com/cfpperche/picode-docker
 
 go 1.26
 
+// The prebuilt binaries are reproducible only with this exact Go (make check-release).
+toolchain go1.26.0
+
 require modernc.org/sqlite v1.57.0
 
 require (

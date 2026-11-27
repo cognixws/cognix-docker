@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -52,6 +53,12 @@ func (f fakeSystem) sys() System {
 				return l, nil
 			}
 			return "", fs.ErrNotExist
+		},
+		EvalSymlinks: func(p string) (string, error) {
+			if l, ok := f.links[p]; ok {
+				return l, nil
+			}
+			return p, nil
 		},
 		LookPath: func(n string) (string, error) {
 			if p, ok := f.path[n]; ok {
@@ -105,9 +112,17 @@ func TestDiagnose(t *testing.T) {
 		{"PICODE_DOCKER_HOST is boxes' override, not the docker command's",
 			fakeSystem{env: map[string]string{"PICODE_DOCKER_HOST": "tcp://10.0.0.5:2375"}, path: native, files: up, engines: map[string]error{"/var/run/docker.sock": nil}},
 			StateReady, SourceDefault, false},
-		{"DOCKER_CONTEXT outranks DOCKER_HOST",
-			fakeSystem{env: map[string]string{"DOCKER_CONTEXT": "work", "DOCKER_HOST": "unix:///tmp/own.sock"}, context: "ssh://me@server"},
+		// docker's own order: DOCKER_HOST outranks DOCKER_CONTEXT.
+		{"DOCKER_HOST outranks DOCKER_CONTEXT",
+			fakeSystem{env: map[string]string{"DOCKER_CONTEXT": "work", "DOCKER_HOST": "unix:///tmp/own.sock"}, context: "ssh://me@server", files: map[string]fs.FileMode{"/tmp/own.sock": sock}, engines: map[string]error{"/tmp/own.sock": nil}},
+			StateReady, SourceEnv, false},
+		{"Desktop's own CLI (linked into /mnt/wsl) with an ssh context",
+			fakeSystem{context: "ssh://me@server", path: map[string]string{"docker": "/usr/bin/docker"},
+				links: map[string]string{"/usr/bin/docker": "/mnt/wsl/docker-desktop/cli-tools/usr/bin/docker"}, files: up, engines: map[string]error{"/var/run/docker.sock": nil}},
 			StateRemote, SourceContext, false},
+		{"a static rootless install in ~/bin, default socket",
+			fakeSystem{path: map[string]string{"docker": "/home/u/bin/docker", "dockerd": "/home/u/bin/dockerd", "dockerd-rootless.sh": "/home/u/bin/dockerd-rootless.sh"}},
+			StateStopped, SourceDefault, true},
 		// Never another engine than the docker command's: a rootless or a
 		// Desktop socket that answers does not make the default one ready.
 		{"default socket missing, a rootless socket answers",
@@ -129,9 +144,10 @@ func TestDiagnose(t *testing.T) {
 		{"DOCKER_CONTEXT names a context the command cannot read",
 			fakeSystem{env: map[string]string{"DOCKER_CONTEXT": "gone"}, ctxErr: errors.New("context not found"), path: native, files: up, engines: map[string]error{"/var/run/docker.sock": nil}},
 			StateSilent, SourceContext, false},
-		{"the default context's own error keeps the default socket",
-			fakeSystem{ctxErr: errors.New("config unreadable"), path: native, files: up, engines: map[string]error{"/var/run/docker.sock": nil}},
-			StateReady, SourceDefault, false},
+		// The docker command fails the same way: never ready on a guess.
+		{"the selected context cannot be read (deleted, or the lookup timed out)",
+			fakeSystem{ctxErr: errors.New("context not found"), path: native, files: up, engines: map[string]error{"/var/run/docker.sock": nil}},
+			StateSilent, SourceContext, false},
 		{"socket refuses the account",
 			fakeSystem{path: native, files: up, engines: map[string]error{"/var/run/docker.sock": syscall.EACCES}},
 			StateDenied, SourceDefault, false},
@@ -180,22 +196,77 @@ func TestDiagnose(t *testing.T) {
 }
 
 func TestCacheKeepsADiagnosisForItsTTL(t *testing.T) {
+	ctx := context.Background()
 	c := &Cache{TTL: time.Hour}
+	var mu sync.Mutex
 	n := 0
-	run := func() Diagnosis { n++; return Diagnosis{State: StateReady} }
-	c.Get("a", run)
-	c.Get("a", run)
+	release := make(chan struct{})
+	run := func(context.Context) Diagnosis {
+		<-release
+		mu.Lock()
+		n++
+		mu.Unlock()
+		return Diagnosis{State: StateReady}
+	}
+	// Three routes of one page read at once: one run.
+	var wg sync.WaitGroup
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); c.Get(ctx, "a", run) }()
+	}
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	c.Get(ctx, "a", run)
 	if n != 1 {
 		t.Fatalf("ran %d times", n)
 	}
-	c.Get("b", run) // another PATH is another question
+	c.Get(ctx, "b", run) // another key is another question
 	if n != 2 {
 		t.Fatalf("ran %d times", n)
 	}
-	c.TTL = 0
-	c.Get("b", run)
-	if n != 3 {
-		t.Fatalf("ran %d times", n)
+}
+
+func TestCacheIgnoresACallersCancellation(t *testing.T) {
+	c := &Cache{TTL: time.Hour}
+	started := make(chan struct{})
+	finish := make(chan struct{})
+	run := func(ctx context.Context) Diagnosis {
+		close(started)
+		<-finish
+		if ctx.Err() != nil {
+			return Diagnosis{State: StateSilent, Detail: ctx.Err().Error()}
+		}
+		return Diagnosis{State: StateReady}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { <-started; cancel() }()
+	if d := c.Get(ctx, "a", run); d.State != StateSilent {
+		t.Fatalf("the cancelled caller got %s", d.State)
+	}
+	close(finish)
+	time.Sleep(20 * time.Millisecond)
+	if d := c.Get(context.Background(), "a", run); d.State != StateReady {
+		t.Fatalf("the next caller got %s: a cancellation was kept", d.State)
+	}
+}
+
+func TestSearchPathAndWindowsDrive(t *testing.T) {
+	got := SearchPath("/usr/bin:relative::/opt/x", "/home/u")
+	want := "/usr/bin:/opt/x:/home/u/.local/bin:/home/u/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin:/bin"
+	if got != want {
+		t.Fatalf("SearchPath = %s", got)
+	}
+	sys := fakeSystem{links: map[string]string{"/usr/bin/docker": "/mnt/wsl/docker-desktop/cli-tools/usr/bin/docker", "/usr/local/bin/docker": "/mnt/c/Program Files/Docker/Docker/resources/bin/docker"}}.sys()
+	for p, want := range map[string]bool{
+		"/mnt/c/Program Files/Docker/Docker/resources/bin/docker": true,
+		"/usr/local/bin/docker":                                   true,  // a link onto the Windows drive
+		"/usr/bin/docker":                                         false, // Desktop's real CLI
+		"/mnt/wsl/shared/docker":                                  false,
+	} {
+		if sys.onWindowsDrive(p) != want {
+			t.Errorf("%s: onWindowsDrive = %v", p, !want)
+		}
 	}
 }
 
@@ -244,7 +315,7 @@ func TestDiagnoseRealSockets(t *testing.T) {
 		{"unix://" + stale, StateSilent}, // a chosen connection that doesn't answer
 		{"unix://" + filepath.Join(dir, "missing.sock"), StateSilent},
 	} {
-		sys := LocalSystem(nil)
+		sys := LocalSystem()
 		sys.Getenv = func(k string) string {
 			if k == "DOCKER_HOST" {
 				return tc.host
