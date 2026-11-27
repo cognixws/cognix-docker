@@ -676,10 +676,12 @@ body {
 .dk-modal-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
 
 /* Toast — top-right so it never occludes bottom sheets or footers */
+/* Bottom centre: the header's buttons sit top right. */
 .dk-toast {
   position: fixed;
-  top: 12px;
-  right: 14px;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
   padding: 8px 14px;
   border-radius: 999px;
   background: var(--dk-elevated);

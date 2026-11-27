@@ -31,7 +31,7 @@ func TestOverviewSaysWhichCase(t *testing.T) {
 		{engine.Diagnosis{State: engine.StateDenied, Endpoint: "unix:///var/run/docker.sock", Source: "default"}, "No permission to use Docker", "recheck", "", "Give access"},
 		{engine.Diagnosis{State: engine.StateDenied, Endpoint: "unix:///srv/d.sock", Source: "env"}, "No permission to use Docker", "recheck", "", "/srv/d.sock"},
 		{engine.Diagnosis{State: engine.StateRemote, Endpoint: "ssh://me@server", Source: "context"}, "Docker points to another computer", "copy", "docker context use default", "ssh://me@server"},
-		{engine.Diagnosis{State: engine.StateRemote, Endpoint: "tcp://10.0.0.5:2375", Source: "env"}, "Docker points to another computer", "recheck", "", "Remove DOCKER_HOST"},
+		{engine.Diagnosis{State: engine.StateRemote, Endpoint: "tcp://10.0.0.5:2375", Source: "env"}, "Docker points to another computer", "recheck", "", "Remove the DOCKER_HOST setting"},
 		{engine.Diagnosis{State: engine.StateNoEngine, Source: "default"}, "Docker's engine isn't installed", "recheck", "", "Software"},
 		{engine.Diagnosis{State: engine.StateAbsent, Source: "default"}, "Docker isn't installed", "recheck", "", "Software"},
 		{engine.Diagnosis{State: engine.StateIncompatible, Source: "default"}, "This Docker is too old", "recheck", "", "Docker 25"},

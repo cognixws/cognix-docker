@@ -186,7 +186,7 @@
       else if (navigator.clipboard) await navigator.clipboard.writeText(text);
       showToast(label);
     } catch {
-      showToast("Copy unavailable here.");
+      showToast("Couldn't copy here. Select the command and copy it.");
     }
   }
 

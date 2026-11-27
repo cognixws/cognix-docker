@@ -63,7 +63,7 @@ func ProblemOf(d Diagnosis) Problem {
 	case StateDenied:
 		p.Title = "No permission to use Docker"
 		if chosen {
-			p.Sentence = fmt.Sprintf("The connection Docker is set to use, %s, doesn't let this account in. Change its permissions, then check again.", d.Endpoint)
+			p.Sentence = fmt.Sprintf("The connection Docker is set to use, %s, doesn't let this account in. Give this account access to that socket, then check again.", d.Endpoint)
 		} else {
 			p.Sentence = "Docker is running, but this account isn't allowed to use it. In the COGNIX[WS] app, open Software › Docker Engine and choose Give access, then check again."
 		}
@@ -73,7 +73,7 @@ func ProblemOf(d Diagnosis) Problem {
 			p.Sentence = fmt.Sprintf("Docker is set to reach %s, and this extension only manages Docker on this computer. Switch back with this command.", d.Endpoint)
 			p.Action = copyCmd("docker context use default")
 		} else {
-			p.Sentence = fmt.Sprintf("DOCKER_HOST sends Docker to %s, and this extension only manages Docker on this computer. Remove DOCKER_HOST, then check again.", d.Endpoint)
+			p.Sentence = fmt.Sprintf("DOCKER_HOST sends Docker to %s, and this extension only manages Docker on this computer. Remove the DOCKER_HOST setting, then check again.", d.Endpoint)
 		}
 	case StateNoEngine:
 		p.Title = "Docker's engine isn't installed"
