@@ -24,17 +24,21 @@ func TestOverviewSaysWhichCase(t *testing.T) {
 		command string
 		has     string
 	}{
-		{engine.Diagnosis{State: engine.StateStopped, Systemd: true}, "Docker is installed but not running", "copy", "sudo systemctl start docker", "Start it"},
-		{engine.Diagnosis{State: engine.StateStopped}, "Docker is installed but not running", "copy", "sudo service docker start", "Start it"},
-		{engine.Diagnosis{State: engine.StateDesktop, Distro: "COGNIX"}, "Docker Desktop is installed but not connected to COGNIX[WS]", "recheck", "", "WSL integration › COGNIX"},
-		{engine.Diagnosis{State: engine.StateDenied, Endpoint: "unix:///var/run/docker.sock"}, "No permission to use Docker", "recheck", "", "Give access"},
-		{engine.Diagnosis{State: engine.StateRemote, Endpoint: "ssh://me@server"}, "Docker points to another computer", "copy", "docker context use default", "ssh://me@server"},
-		{engine.Diagnosis{State: engine.StateNoEngine}, "Docker's engine isn't installed", "recheck", "", "Software"},
-		{engine.Diagnosis{State: engine.StateAbsent}, "Docker isn't installed", "recheck", "", "Software"},
-		{engine.Diagnosis{State: engine.StateIncompatible}, "This Docker is too old", "recheck", "", "Docker 25"},
-		{engine.Diagnosis{State: engine.StateSilent}, "Docker doesn't answer", "recheck", "", "Restart Docker"},
+		{engine.Diagnosis{State: engine.StateStopped, Systemd: true, Source: "default"}, "Docker is installed but not running", "copy", "sudo systemctl start docker", "Start it"},
+		{engine.Diagnosis{State: engine.StateStopped, Source: "default"}, "Docker is installed but not running", "copy", "sudo service docker start", "Start it"},
+		{engine.Diagnosis{State: engine.StateStopped, Systemd: true, Rootless: true, Source: "default"}, "Docker is installed but not running", "copy", "systemctl --user start docker", "Start it"},
+		{engine.Diagnosis{State: engine.StateDesktop, Distro: "COGNIX", Source: "default"}, "Docker Desktop is installed but not connected to COGNIX[WS]", "recheck", "", "WSL integration › COGNIX"},
+		{engine.Diagnosis{State: engine.StateDenied, Endpoint: "unix:///var/run/docker.sock", Source: "default"}, "No permission to use Docker", "recheck", "", "Give access"},
+		{engine.Diagnosis{State: engine.StateDenied, Endpoint: "unix:///srv/d.sock", Source: "env"}, "No permission to use Docker", "recheck", "", "/srv/d.sock"},
+		{engine.Diagnosis{State: engine.StateRemote, Endpoint: "ssh://me@server", Source: "context"}, "Docker points to another computer", "copy", "docker context use default", "ssh://me@server"},
+		{engine.Diagnosis{State: engine.StateRemote, Endpoint: "tcp://10.0.0.5:2375", Source: "env"}, "Docker points to another computer", "recheck", "", "Remove DOCKER_HOST"},
+		{engine.Diagnosis{State: engine.StateNoEngine, Source: "default"}, "Docker's engine isn't installed", "recheck", "", "Software"},
+		{engine.Diagnosis{State: engine.StateAbsent, Source: "default"}, "Docker isn't installed", "recheck", "", "Software"},
+		{engine.Diagnosis{State: engine.StateIncompatible, Source: "default"}, "This Docker is too old", "recheck", "", "Docker 25"},
+		{engine.Diagnosis{State: engine.StateSilent, Source: "default"}, "Docker doesn't answer", "recheck", "", "Restart Docker"},
+		{engine.Diagnosis{State: engine.StateSilent, Endpoint: "unix:///tmp/gone.sock", Source: "env"}, "Docker doesn't answer", "recheck", "", "/tmp/gone.sock"},
 	} {
-		t.Run(string(tc.d.State), func(t *testing.T) {
+		t.Run(string(tc.d.State)+"/"+tc.d.Source, func(t *testing.T) {
 			st, err := sysadmin.OpenStore(filepath.Join(t.TempDir(), "data.db"))
 			if err != nil {
 				t.Fatal(err)

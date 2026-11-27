@@ -7,6 +7,12 @@ package engine
 // panel never disagree without saying why. Keep the two in step; the table
 // is in docs/architecture/software.md, "Docker: installed and usable", and
 // in TestDiagnose.
+//
+// It only ever reaches the engine the docker command itself uses: the
+// connection the person chose, or /var/run/docker.sock. Other sockets
+// (rootless, Docker Desktop's in the shared /mnt/wsl, which any account
+// of any distribution can write) are never connected to; what is
+// installed only says which case it is.
 
 import (
 	"context"
@@ -20,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -28,59 +35,62 @@ import (
 type State string
 
 const (
-	// StateReady: an engine answers on Endpoint.
+	// StateReady: the engine the docker command uses answers.
 	StateReady State = "ready"
-	// StateRemote: DOCKER_HOST or the selected context points to tcp://,
-	// ssh:// or a Windows pipe, which neither COGNIX[WS] nor the extension
-	// reaches.
+	// StateRemote: the chosen connection is tcp://, ssh:// or a Windows
+	// pipe, which neither COGNIX[WS] nor the extension reaches.
 	StateRemote State = "remote"
-	// StateDenied: a socket is there and refuses this account (not in the
-	// docker group, or added to it without a new session).
+	// StateDenied: the socket is there and refuses this account (not in
+	// the docker group, or added to it without a new session).
 	StateDenied State = "denied"
-	// StateStopped: Docker Engine is installed in this Linux and no socket
-	// answers (the service is not started; no systemd starts it).
+	// StateStopped: Docker Engine is installed in this Linux and its
+	// socket does not answer (the service is not started).
 	StateStopped State = "stopped"
-	// StateDesktop: Docker Desktop is on this Windows and this Linux does not
-	// see its engine: Desktop is not running or its WSL integration is off
-	// for this distribution.
+	// StateDesktop: Docker Desktop is on this Windows and this Linux has
+	// no engine of its own: Desktop is not running or its WSL integration
+	// is off for this distribution.
 	StateDesktop State = "desktop"
-	// StateNoEngine: the docker command is here and no engine is installed
-	// (the client package alone).
+	// StateNoEngine: the docker command is here and no engine is installed.
 	StateNoEngine State = "no-engine"
 	// StateAbsent: nothing of Docker on this computer.
 	StateAbsent State = "absent"
 	// StateIncompatible: the engine answers with an API older than 1.44.
 	StateIncompatible State = "incompatible"
-	// StateSilent: a socket is there and does not answer for another reason.
+	// StateSilent: the socket is there and does not answer for another
+	// reason, or a connection the person chose does not answer.
 	StateSilent State = "silent"
 )
+
+// Where the connection came from.
+const (
+	SourceDefault = "default" // /var/run/docker.sock
+	SourceEnv     = "env"     // DOCKER_HOST
+	SourceContext = "context" // the docker command's selected context
+)
+
+const defaultSocket = "/var/run/docker.sock"
 
 // Diagnosis is what Diagnose found.
 type Diagnosis struct {
 	State State `json:"state"`
-	// Endpoint is the socket that answered (ready), refused (denied) or the
-	// remote address (remote).
+	// Endpoint is the connection that was tried.
 	Endpoint string `json:"endpoint,omitempty"`
-	// Distro is this WSL distribution's name, for "turn on WSL integration
-	// for <distro>"; empty outside WSL.
+	// Source says where Endpoint came from: default, env or context.
+	Source string `json:"source,omitempty"`
+	// Distro is this WSL distribution's name, read only for the desktop
+	// state ("turn on WSL integration for <distro>").
 	Distro string `json:"distro,omitempty"`
-	// Systemd says whether systemd runs here: it picks the start command.
-	Systemd bool `json:"systemd"`
+	// Systemd says whether systemd runs here; Rootless that the engine
+	// installed is a rootless one only. Both pick the start command.
+	Systemd  bool `json:"systemd"`
+	Rootless bool `json:"rootless,omitempty"`
 	// Detail is the engine's own error, for a log or a tooltip.
 	Detail string `json:"detail,omitempty"`
 }
 
-// Desktop's sockets as a WSL distribution sees them: its shared socket in
-// the tmpfs every WSL 2 distribution mounts at /mnt/wsl, and the socket a
-// manual shared dockerd commonly uses. Tried only after the usual ones.
-var desktopSockets = []string{
-	"/mnt/wsl/docker-desktop/shared-sockets/guest-services/docker.sock",
-	"/mnt/wsl/shared-docker/docker.sock",
-}
-
 // Docker Desktop leaves these behind in a WSL distribution: its shared
 // mount (while it runs), its install folder on the Windows drive, and the
-// /usr/bin/docker link its integration writes.
+// /usr/bin/docker link its integration writes. Evidence only.
 const (
 	desktopMount   = "/mnt/wsl/docker-desktop"
 	desktopWindows = "/mnt/c/Program Files/Docker/Docker"
@@ -92,29 +102,34 @@ type System struct {
 	Getenv   func(string) string
 	Stat     func(string) (fs.FileInfo, error)
 	Readlink func(string) (string, error)
+	// LookPath finds a command on the PATH the caller's docker row uses.
 	LookPath func(string) (string, error)
-	// ContextHost asks the docker command for the selected context's host;
-	// nil when there is no usable docker command.
+	// ContextHost asks the docker command for the selected context's host.
 	ContextHost func(ctx context.Context) (string, error)
 	// Ping reaches the engine on a Unix socket path: nil when it answers
 	// with a compatible API.
 	Ping   func(ctx context.Context, path string) error
 	Distro func(ctx context.Context) string
-	UID    int
 }
 
 // ErrIncompatible is Ping's answer for an engine older than API 1.44.
 var ErrIncompatible = errors.New("this Docker API version is too old (requires API 1.44)")
 
-// LocalSystem reads this computer.
-func LocalSystem() System {
+var errNoContext = errors.New("no docker context")
+
+// LocalSystem reads this computer; lookPath, when set, replaces the
+// daemon's own PATH lookup (Software passes the PATH its rows use).
+func LocalSystem(lookPath func(string) (string, error)) System {
+	if lookPath == nil {
+		lookPath = exec.LookPath
+	}
 	return System{
 		Getenv:   os.Getenv,
 		Stat:     os.Stat,
 		Readlink: os.Readlink,
-		LookPath: exec.LookPath,
+		LookPath: lookPath,
 		ContextHost: func(ctx context.Context) (string, error) {
-			path, err := exec.LookPath("docker")
+			path, err := lookPath("docker")
 			if err != nil || isWindowsPath(path) {
 				return "", errNoContext
 			}
@@ -122,17 +137,14 @@ func LocalSystem() System {
 			defer cancel()
 			out, err := exec.CommandContext(cctx, path, "context", "inspect", "--format", "{{.Endpoints.docker.Host}}").Output()
 			if err != nil {
-				return "", errNoContext
+				return "", fmt.Errorf("the selected Docker context could not be read: %w", err)
 			}
 			return strings.TrimSpace(string(out)), nil
 		},
 		Ping:   pingSocket,
 		Distro: wslDistro,
-		UID:    os.Getuid(),
 	}
 }
-
-var errNoContext = errors.New("no docker context")
 
 // isWindowsPath says a command lives on a Windows drive: Docker Desktop's
 // stand-in that only says WSL integration is off, or Windows' own PATH.
@@ -143,83 +155,51 @@ func isWindowsPath(p string) bool {
 	return strings.HasPrefix(filepath.ToSlash(p), "/mnt/")
 }
 
-// Diagnose walks the table: an explicit connection first (PICODE_DOCKER_HOST,
-// DOCKER_HOST without DOCKER_CONTEXT, a selected context), then the sockets
-// Docker uses on Linux, rootless and Docker Desktop; when none answers, what
-// is installed says which case it is.
+// Diagnose reaches the engine the docker command uses and, when it does
+// not answer, reads what is installed to say which case it is.
 func Diagnose(ctx context.Context, sys System) Diagnosis {
 	d := Diagnosis{}
-	if sys.Distro != nil {
-		d.Distro = sys.Distro(ctx)
-	}
 	if fi, err := sys.Stat("/run/systemd/system"); err == nil && fi.IsDir() {
 		d.Systemd = true
 	}
-	explicit, pinned := explicitHost(ctx, sys)
-	candidates := []string{}
-	if explicit != "" {
-		path, ok := unixPath(explicit)
-		if !ok {
-			d.State, d.Endpoint = StateRemote, explicit
-			return d
-		}
-		candidates = append(candidates, path)
-	}
-	if !pinned {
-		candidates = append(candidates, "/var/run/docker.sock")
-		if x := strings.TrimSpace(sys.Getenv("XDG_RUNTIME_DIR")); filepath.IsAbs(x) {
-			candidates = append(candidates, filepath.Join(x, "docker.sock"))
-		}
-		if sys.UID > 0 {
-			candidates = append(candidates, fmt.Sprintf("/run/user/%d/docker.sock", sys.UID))
-		}
-		candidates = append(candidates, desktopSockets...)
-	}
-	var denied, silent string
-	var deniedErr, silentErr error
-	seen := map[string]bool{}
-	for _, p := range candidates {
-		p = filepath.Clean(p)
-		if seen[p] {
-			continue
-		}
-		seen[p] = true
-		fi, err := sys.Stat(p)
-		if err != nil {
-			if errors.Is(err, fs.ErrPermission) && denied == "" {
-				denied, deniedErr = p, err
-			}
-			continue
-		}
-		if fi.Mode()&fs.ModeSocket == 0 {
-			continue
-		}
-		err = sys.Ping(ctx, p)
-		switch {
-		case err == nil:
-			d.State, d.Endpoint = StateReady, "unix://"+p
-			return d
-		case errors.Is(err, ErrIncompatible):
-			d.State, d.Endpoint, d.Detail = StateIncompatible, "unix://"+p, err.Error()
-			return d
-		case isDenied(err):
-			if denied == "" {
-				denied, deniedErr = p, err
-			}
-		case isDead(err):
-			// A socket file left behind by a stopped engine.
-		default:
-			if silent == "" {
-				silent, silentErr = p, err
-			}
-		}
-	}
-	if denied != "" {
-		d.State, d.Endpoint, d.Detail = StateDenied, "unix://"+denied, deniedErr.Error()
+	host, source, err := chosenHost(ctx, sys)
+	d.Endpoint, d.Source = host, source
+	if err != nil {
+		d.State, d.Detail = StateSilent, err.Error()
 		return d
 	}
-	if silent != "" {
-		d.State, d.Endpoint, d.Detail = StateSilent, "unix://"+silent, silentErr.Error()
+	path, ok := unixPath(host)
+	if !ok {
+		d.State = StateRemote
+		return d
+	}
+	fi, err := sys.Stat(path)
+	switch {
+	case err != nil && errors.Is(err, fs.ErrPermission):
+		d.State, d.Detail = StateDenied, err.Error()
+		return d
+	case err == nil && fi.Mode()&fs.ModeSocket != 0:
+		err = sys.Ping(ctx, path)
+		switch {
+		case err == nil:
+			d.State = StateReady
+			return d
+		case errors.Is(err, ErrIncompatible):
+			d.State, d.Detail = StateIncompatible, err.Error()
+			return d
+		case isDenied(err):
+			d.State, d.Detail = StateDenied, err.Error()
+			return d
+		case !isDead(err):
+			d.State, d.Detail = StateSilent, err.Error()
+			return d
+		}
+		// A socket file a stopped engine left behind: nothing answers.
+	}
+	if source != SourceDefault {
+		// The connection the person chose does not answer; starting
+		// another engine would not change what the docker command uses.
+		d.State = StateSilent
 		return d
 	}
 	cli, cliErr := sys.LookPath("docker")
@@ -228,10 +208,15 @@ func Diagnose(ctx context.Context, sys System) Diagnosis {
 		desktopCLI = true
 	}
 	switch {
-	case hasEngine(sys):
+	case hasSystemEngine(sys):
 		d.State = StateStopped
+	case hasCommand(sys, "dockerd-rootless.sh"):
+		d.State, d.Rootless = StateStopped, true
 	case desktopCLI || exists(sys, desktopMount) || exists(sys, desktopWindows):
 		d.State = StateDesktop
+		if sys.Distro != nil {
+			d.Distro = sys.Distro(ctx)
+		}
 	case cliErr == nil:
 		d.State = StateNoEngine
 	default:
@@ -240,26 +225,29 @@ func Diagnose(ctx context.Context, sys System) Diagnosis {
 	return d
 }
 
-// explicitHost is the connection the person chose; pinned says only that
-// one counts (an environment variable), not the fallbacks.
-func explicitHost(ctx context.Context, sys System) (host string, pinned bool) {
-	if h := strings.TrimSpace(sys.Getenv("PICODE_DOCKER_HOST")); h != "" {
-		return h, true
-	}
-	if sys.Getenv("DOCKER_CONTEXT") == "" {
+// chosenHost is the connection the docker command uses: DOCKER_HOST
+// without DOCKER_CONTEXT, the selected context, or the default socket.
+// PICODE_DOCKER_HOST (boxes' own override) is not read: the docker command
+// and the extension's process, which never gets PICODE_ variables, do not
+// see it either. A DOCKER_CONTEXT the command cannot read is an error: the
+// command would fail too.
+func chosenHost(ctx context.Context, sys System) (host, source string, err error) {
+	named := sys.Getenv("DOCKER_CONTEXT") != ""
+	if !named {
 		if h := strings.TrimSpace(sys.Getenv("DOCKER_HOST")); h != "" {
-			return h, true
+			return h, SourceEnv, nil
 		}
 	}
 	if sys.ContextHost != nil {
-		if h, err := sys.ContextHost(ctx); err == nil && h != "" {
-			// The default context names /var/run/docker.sock: the
-			// fallbacks still apply. Any other context is the person's
-			// choice, and DOCKER_CONTEXT pins it.
-			return h, sys.Getenv("DOCKER_CONTEXT") != "" || h != "unix:///var/run/docker.sock"
+		h, err := sys.ContextHost(ctx)
+		switch {
+		case err == nil && h != "" && h != "unix://"+defaultSocket:
+			return h, SourceContext, nil
+		case err != nil && !errors.Is(err, errNoContext) && named:
+			return "", SourceContext, err
 		}
 	}
-	return "", false
+	return "unix://" + defaultSocket, SourceDefault, nil
 }
 
 func unixPath(endpoint string) (string, bool) {
@@ -270,11 +258,9 @@ func unixPath(endpoint string) (string, bool) {
 	return filepath.Clean(u.Path), true
 }
 
-func hasEngine(sys System) bool {
-	for _, name := range []string{"dockerd", "dockerd-rootless.sh"} {
-		if p, err := sys.LookPath(name); err == nil && !isWindowsPath(p) {
-			return true
-		}
+func hasSystemEngine(sys System) bool {
+	if hasCommand(sys, "dockerd") {
+		return true
 	}
 	// A systemd service's PATH may lack /usr/sbin.
 	for _, p := range []string{"/usr/bin/dockerd", "/usr/sbin/dockerd", "/usr/local/bin/dockerd"} {
@@ -283,6 +269,11 @@ func hasEngine(sys System) bool {
 		}
 	}
 	return false
+}
+
+func hasCommand(sys System, name string) bool {
+	p, err := sys.LookPath(name)
+	return err == nil && !isWindowsPath(p)
 }
 
 func exists(sys System, p string) bool {
@@ -354,4 +345,30 @@ func DistroFromUNC(s string) string {
 		return p[i+1:]
 	}
 	return ""
+}
+
+// Cache keeps a diagnosis for TTL per key, so a page that reads several
+// routes at once, or a loop, asks Docker once.
+type Cache struct {
+	TTL time.Duration
+	mu  sync.Mutex
+	key string
+	at  time.Time
+	d   Diagnosis
+}
+
+// Get answers the kept diagnosis for key while it is fresh, else run's.
+func (c *Cache) Get(key string, run func() Diagnosis) Diagnosis {
+	c.mu.Lock()
+	if c.key == key && !c.at.IsZero() && time.Since(c.at) < c.TTL {
+		d := c.d
+		c.mu.Unlock()
+		return d
+	}
+	c.mu.Unlock()
+	d := run()
+	c.mu.Lock()
+	c.key, c.at, c.d = key, time.Now(), d
+	c.mu.Unlock()
+	return d
 }

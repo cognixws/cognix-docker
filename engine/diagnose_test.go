@@ -34,6 +34,7 @@ type fakeSystem struct {
 	links   map[string]string
 	path    map[string]string
 	context string
+	ctxErr  error
 	engines map[string]error // socket path → Ping's answer
 }
 
@@ -59,6 +60,9 @@ func (f fakeSystem) sys() System {
 			return "", errors.New("not found")
 		},
 		ContextHost: func(context.Context) (string, error) {
+			if f.ctxErr != nil {
+				return "", f.ctxErr
+			}
 			if f.context == "" {
 				return "", errNoContext
 			}
@@ -71,7 +75,6 @@ func (f fakeSystem) sys() System {
 			return syscall.ECONNREFUSED
 		},
 		Distro: func(context.Context) string { return "COGNIX" },
-		UID:    1000,
 	}
 }
 
@@ -79,92 +82,120 @@ func (f fakeSystem) sys() System {
 // "Docker: installed and usable": one row per case.
 func TestDiagnose(t *testing.T) {
 	native := map[string]string{"docker": "/usr/bin/docker", "dockerd": "/usr/bin/dockerd"}
+	up := map[string]fs.FileMode{"/var/run/docker.sock": sock}
+	shim := "/mnt/c/Program Files/Docker/Docker/resources/bin/docker"
+	desktopSock := "/mnt/wsl/docker-desktop/shared-sockets/guest-services/docker.sock"
 	for _, tc := range []struct {
 		name     string
 		f        fakeSystem
 		want     State
-		endpoint string
+		source   string
+		rootless bool
 	}{
-		{"engine answers on the usual socket",
-			fakeSystem{path: native, files: map[string]fs.FileMode{"/var/run/docker.sock": sock}, engines: map[string]error{"/var/run/docker.sock": nil}},
-			StateReady, "unix:///var/run/docker.sock"},
-		{"rootless socket in XDG_RUNTIME_DIR",
-			fakeSystem{env: map[string]string{"XDG_RUNTIME_DIR": "/run/user/1000"}, path: map[string]string{"docker": "/home/u/bin/docker", "dockerd-rootless.sh": "/home/u/bin/dockerd-rootless.sh"},
+		{"engine answers on the default socket",
+			fakeSystem{path: native, files: up, engines: map[string]error{"/var/run/docker.sock": nil}},
+			StateReady, SourceDefault, false},
+		{"rootless context answers",
+			fakeSystem{context: "unix:///run/user/1000/docker.sock", path: map[string]string{"docker": "/usr/bin/docker", "dockerd-rootless.sh": "/usr/bin/dockerd-rootless.sh"},
 				files: map[string]fs.FileMode{"/run/user/1000/docker.sock": sock}, engines: map[string]error{"/run/user/1000/docker.sock": nil}},
-			StateReady, "unix:///run/user/1000/docker.sock"},
-		{"rootless socket without XDG_RUNTIME_DIR (a systemd service)",
-			fakeSystem{files: map[string]fs.FileMode{"/run/user/1000/docker.sock": sock}, engines: map[string]error{"/run/user/1000/docker.sock": nil}},
-			StateReady, "unix:///run/user/1000/docker.sock"},
-		{"Docker Desktop's shared WSL socket, integration off",
-			fakeSystem{path: map[string]string{"docker": "/mnt/c/Program Files/Docker/Docker/resources/bin/docker"},
-				files:   map[string]fs.FileMode{desktopMount: fs.ModeDir, desktopSockets[0]: sock},
-				engines: map[string]error{desktopSockets[0]: nil}},
-			StateReady, "unix://" + desktopSockets[0]},
-		{"stale socket file beside a working Desktop socket",
-			fakeSystem{files: map[string]fs.FileMode{"/var/run/docker.sock": sock, desktopSockets[0]: sock}, engines: map[string]error{desktopSockets[0]: nil}},
-			StateReady, "unix://" + desktopSockets[0]},
+			StateReady, SourceContext, false},
 		{"DOCKER_HOST names a reachable socket",
 			fakeSystem{env: map[string]string{"DOCKER_HOST": "unix:///tmp/own.sock"}, files: map[string]fs.FileMode{"/tmp/own.sock": sock}, engines: map[string]error{"/tmp/own.sock": nil}},
-			StateReady, "unix:///tmp/own.sock"},
-		{"DOCKER_HOST pins a dead socket: no fallback to another engine",
-			fakeSystem{env: map[string]string{"DOCKER_HOST": "unix:///tmp/gone.sock"}, path: native,
-				files: map[string]fs.FileMode{"/var/run/docker.sock": sock}, engines: map[string]error{"/var/run/docker.sock": nil}},
-			StateStopped, ""},
+			StateReady, SourceEnv, false},
+		{"PICODE_DOCKER_HOST is boxes' override, not the docker command's",
+			fakeSystem{env: map[string]string{"PICODE_DOCKER_HOST": "tcp://10.0.0.5:2375"}, path: native, files: up, engines: map[string]error{"/var/run/docker.sock": nil}},
+			StateReady, SourceDefault, false},
+		{"DOCKER_CONTEXT outranks DOCKER_HOST",
+			fakeSystem{env: map[string]string{"DOCKER_CONTEXT": "work", "DOCKER_HOST": "unix:///tmp/own.sock"}, context: "ssh://me@server"},
+			StateRemote, SourceContext, false},
+		// Never another engine than the docker command's: a rootless or a
+		// Desktop socket that answers does not make the default one ready.
+		{"default socket missing, a rootless socket answers",
+			fakeSystem{path: map[string]string{"docker": "/usr/bin/docker", "dockerd-rootless.sh": "/usr/bin/dockerd-rootless.sh"},
+				files: map[string]fs.FileMode{"/run/user/1000/docker.sock": sock}, engines: map[string]error{"/run/user/1000/docker.sock": nil}},
+			StateStopped, SourceDefault, true},
+		{"integration off, a socket in the shared /mnt/wsl answers",
+			fakeSystem{path: map[string]string{"docker": shim}, files: map[string]fs.FileMode{desktopMount: fs.ModeDir, desktopSock: sock}, engines: map[string]error{desktopSock: nil}},
+			StateDesktop, SourceDefault, false},
+		{"DOCKER_HOST pins a dead socket while the default answers",
+			fakeSystem{env: map[string]string{"DOCKER_HOST": "unix:///tmp/gone.sock"}, path: native, files: up, engines: map[string]error{"/var/run/docker.sock": nil}},
+			StateSilent, SourceEnv, false},
 		{"DOCKER_HOST over tcp",
 			fakeSystem{env: map[string]string{"DOCKER_HOST": "tcp://10.0.0.5:2375"}, path: native},
-			StateRemote, "tcp://10.0.0.5:2375"},
+			StateRemote, SourceEnv, false},
 		{"selected context over ssh",
-			fakeSystem{context: "ssh://me@server", path: native, files: map[string]fs.FileMode{"/var/run/docker.sock": sock}, engines: map[string]error{"/var/run/docker.sock": nil}},
-			StateRemote, "ssh://me@server"},
-		{"default context keeps the fallbacks",
-			fakeSystem{context: "unix:///var/run/docker.sock", files: map[string]fs.FileMode{"/run/user/1000/docker.sock": sock}, engines: map[string]error{"/run/user/1000/docker.sock": nil}},
-			StateReady, "unix:///run/user/1000/docker.sock"},
+			fakeSystem{context: "ssh://me@server", path: native, files: up, engines: map[string]error{"/var/run/docker.sock": nil}},
+			StateRemote, SourceContext, false},
+		{"DOCKER_CONTEXT names a context the command cannot read",
+			fakeSystem{env: map[string]string{"DOCKER_CONTEXT": "gone"}, ctxErr: errors.New("context not found"), path: native, files: up, engines: map[string]error{"/var/run/docker.sock": nil}},
+			StateSilent, SourceContext, false},
+		{"the default context's own error keeps the default socket",
+			fakeSystem{ctxErr: errors.New("config unreadable"), path: native, files: up, engines: map[string]error{"/var/run/docker.sock": nil}},
+			StateReady, SourceDefault, false},
 		{"socket refuses the account",
-			fakeSystem{path: native, files: map[string]fs.FileMode{"/var/run/docker.sock": sock}, engines: map[string]error{"/var/run/docker.sock": syscall.EACCES}},
-			StateDenied, "unix:///var/run/docker.sock"},
+			fakeSystem{path: native, files: up, engines: map[string]error{"/var/run/docker.sock": syscall.EACCES}},
+			StateDenied, SourceDefault, false},
 		{"engine installed, socket missing (service not started)",
 			fakeSystem{path: native},
-			StateStopped, ""},
-		{"engine installed, stale socket refuses connections",
+			StateStopped, SourceDefault, false},
+		{"engine installed, stale socket refuses connections, dockerd off PATH",
 			fakeSystem{path: map[string]string{"docker": "/usr/bin/docker"}, files: map[string]fs.FileMode{"/var/run/docker.sock": sock, "/usr/sbin/dockerd": 0o755}},
-			StateStopped, ""},
-		{"Docker Desktop's stand-in on PATH, integration off, Desktop stopped",
-			fakeSystem{path: map[string]string{"docker": "/mnt/c/Program Files/Docker/Docker/resources/bin/docker"}},
-			StateDesktop, ""},
-		{"integration on, Desktop stopped: its link dangles",
-			fakeSystem{links: map[string]string{desktopCLILink: "/mnt/wsl/docker-desktop/cli-tools/usr/bin/docker"}},
-			StateDesktop, ""},
-		{"Desktop installed on Windows, nothing in this Linux",
-			fakeSystem{files: map[string]fs.FileMode{desktopWindows: fs.ModeDir}},
-			StateDesktop, ""},
-		{"Desktop running, its shared socket refuses this distro",
-			fakeSystem{files: map[string]fs.FileMode{desktopMount: fs.ModeDir, desktopSockets[0]: sock}, engines: map[string]error{desktopSockets[0]: syscall.ECONNREFUSED}},
-			StateDesktop, ""},
-		{"docker command only (client package)",
-			fakeSystem{path: map[string]string{"docker": "/usr/bin/docker"}},
-			StateNoEngine, ""},
-		{"nothing of Docker",
-			fakeSystem{},
-			StateAbsent, ""},
-		{"engine too old",
-			fakeSystem{path: native, files: map[string]fs.FileMode{"/var/run/docker.sock": sock}, engines: map[string]error{"/var/run/docker.sock": ErrIncompatible}},
-			StateIncompatible, "unix:///var/run/docker.sock"},
-		{"socket answers garbage",
-			fakeSystem{path: native, files: map[string]fs.FileMode{"/var/run/docker.sock": sock}, engines: map[string]error{"/var/run/docker.sock": errors.New("Docker returned 500")}},
-			StateSilent, "unix:///var/run/docker.sock"},
+			StateStopped, SourceDefault, false},
 		{"a regular file where the socket should be",
 			fakeSystem{path: native, files: map[string]fs.FileMode{"/var/run/docker.sock": 0o644}},
-			StateStopped, ""},
+			StateStopped, SourceDefault, false},
+		{"Docker Desktop's stand-in on PATH, integration off",
+			fakeSystem{path: map[string]string{"docker": shim}},
+			StateDesktop, SourceDefault, false},
+		{"integration on, Desktop stopped: its link dangles",
+			fakeSystem{links: map[string]string{desktopCLILink: "/mnt/wsl/docker-desktop/cli-tools/usr/bin/docker"}},
+			StateDesktop, SourceDefault, false},
+		{"Desktop installed on Windows, nothing in this Linux",
+			fakeSystem{files: map[string]fs.FileMode{desktopWindows: fs.ModeDir}},
+			StateDesktop, SourceDefault, false},
+		{"docker command only (client package)",
+			fakeSystem{path: map[string]string{"docker": "/usr/bin/docker"}},
+			StateNoEngine, SourceDefault, false},
+		{"nothing of Docker",
+			fakeSystem{},
+			StateAbsent, SourceDefault, false},
+		{"engine too old",
+			fakeSystem{path: native, files: up, engines: map[string]error{"/var/run/docker.sock": ErrIncompatible}},
+			StateIncompatible, SourceDefault, false},
+		{"socket answers garbage",
+			fakeSystem{path: native, files: up, engines: map[string]error{"/var/run/docker.sock": errors.New("Docker returned 500")}},
+			StateSilent, SourceDefault, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := Diagnose(context.Background(), tc.f.sys())
-			if got.State != tc.want || got.Endpoint != tc.endpoint {
-				t.Fatalf("got %s %q, want %s %q (%s)", got.State, got.Endpoint, tc.want, tc.endpoint, got.Detail)
+			if got.State != tc.want || got.Source != tc.source || got.Rootless != tc.rootless {
+				t.Fatalf("got %s/%s rootless=%v, want %s/%s rootless=%v (%s)", got.State, got.Source, got.Rootless, tc.want, tc.source, tc.rootless, got.Detail)
 			}
-			if got.Distro != "COGNIX" {
-				t.Fatalf("distro %q", got.Distro)
+			// The distribution is read only where the copy names it.
+			if (got.Distro == "COGNIX") != (got.State == StateDesktop) {
+				t.Fatalf("distro %q for %s", got.Distro, got.State)
 			}
 		})
+	}
+}
+
+func TestCacheKeepsADiagnosisForItsTTL(t *testing.T) {
+	c := &Cache{TTL: time.Hour}
+	n := 0
+	run := func() Diagnosis { n++; return Diagnosis{State: StateReady} }
+	c.Get("a", run)
+	c.Get("a", run)
+	if n != 1 {
+		t.Fatalf("ran %d times", n)
+	}
+	c.Get("b", run) // another PATH is another question
+	if n != 2 {
+		t.Fatalf("ran %d times", n)
+	}
+	c.TTL = 0
+	c.Get("b", run)
+	if n != 3 {
+		t.Fatalf("ran %d times", n)
 	}
 }
 
@@ -210,12 +241,12 @@ func TestDiagnoseRealSockets(t *testing.T) {
 		{"unix://" + ok, StateReady},
 		{"unix://" + old, StateIncompatible},
 		{"unix://" + denied, StateDenied},
-		{"unix://" + stale, StateAbsent},
-		{"unix://" + filepath.Join(dir, "missing.sock"), StateAbsent},
+		{"unix://" + stale, StateSilent}, // a chosen connection that doesn't answer
+		{"unix://" + filepath.Join(dir, "missing.sock"), StateSilent},
 	} {
-		sys := LocalSystem()
+		sys := LocalSystem(nil)
 		sys.Getenv = func(k string) string {
-			if k == "PICODE_DOCKER_HOST" {
+			if k == "DOCKER_HOST" {
 				return tc.host
 			}
 			return ""

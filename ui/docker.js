@@ -65,6 +65,8 @@
         await new Promise((res) => setTimeout(res, 650));
         return api(path, body, attempt + 1);
       }
+      // No answer from the extension's own process (not an error it sent).
+      if (err && typeof err === "object") err.transport = true;
       throw err;
     }
     let data = {};
@@ -248,7 +250,8 @@
         <button class="dk-btn is-primary" type="button" data-act="retry">Check again</button>
       </div>`;
     }
-    const copy = p.action && p.action.kind === "copy";
+    // After the command is copied, the one action is Check again.
+    const copy = p.action && p.action.kind === "copy" && S.copiedFix !== p.action.command;
     return `<div class="dk-state-box" role="alert" data-state="${esc(p.state)}">
       <h3>${esc(p.title)}</h3>
       <p>${esc(p.sentence)}</p>
@@ -805,9 +808,9 @@
         }
       }
     } catch (e) {
-      // /overview always answers 200 while the helper runs: a throw means
-      // the extension's own process did not answer, not Docker.
-      S.overview = { reachable: false, helperFailed: true, error: e.message, groups: [], openIncidents: [], pendingPlans: [] };
+      // A transport error means the extension's own process did not
+      // answer; an error it sent back (a store error) is not "didn't start".
+      S.overview = { reachable: false, helperFailed: !!(e && e.transport), error: e.message, groups: [], openIncidents: [], pendingPlans: [] };
     } finally {
       S.loading = false;
       drawMain();
@@ -934,8 +937,13 @@
       return;
     }
     if (act === "clear-filters") { S.search = ""; S.filter = "all"; drawMain(); return; }
-    if (act === "retry") { await refreshAll(true); return; }
-    if (act === "copy-fix") { await copyText(actEl.dataset.cmd || "", "Copied. Run it in a COGNIX[WS] terminal, then come back here."); return; }
+    if (act === "retry") {
+      actEl.disabled = true;
+      actEl.textContent = "Checking…";
+      await refreshAll(true);
+      return;
+    }
+    if (act === "copy-fix") { await copyText(actEl.dataset.cmd || "", "Copied. Run it in a COGNIX[WS] terminal, then check again."); S.copiedFix = actEl.dataset.cmd || ""; drawMain(); return; }
     if (act === "go-plans") { switchView("plans"); return; }
     if (act === "go-stacks") { switchView("stacks"); return; }
     if (act === "open-ext-settings" && placesDoor) { await placesDoor.settings(); return; }

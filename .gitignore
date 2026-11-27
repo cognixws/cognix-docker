@@ -3,3 +3,4 @@
 !/bin/cognix-docker-Linux-aarch64
 *.test
 *.out
+/.release-check/

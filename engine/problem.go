@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // Problem is what the panel and an agent's tool say when Docker cannot be
@@ -40,10 +41,13 @@ func ProblemOf(d Diagnosis) Problem {
 	recheck := Action{Kind: "recheck", Label: "Check again"}
 	copyCmd := func(c string) Action { return Action{Kind: "copy", Label: "Copy command", Command: c} }
 	p := Problem{State: d.State, Endpoint: d.Endpoint, Distro: d.Distro, Detail: d.Detail, Action: recheck}
+	chosen := d.Source != "" && d.Source != SourceDefault
 	switch d.State {
 	case StateStopped:
 		cmd := "sudo service docker start"
-		if d.Systemd {
+		if d.Rootless {
+			cmd = "systemctl --user start docker"
+		} else if d.Systemd {
 			cmd = "sudo systemctl start docker"
 		}
 		p.Title = "Docker is installed but not running"
@@ -58,11 +62,19 @@ func ProblemOf(d Diagnosis) Problem {
 		}
 	case StateDenied:
 		p.Title = "No permission to use Docker"
-		p.Sentence = "Docker is running, but this account isn't allowed to use it. In the COGNIX[WS] app, open Software › Docker Engine and choose Give access, then check again."
+		if chosen {
+			p.Sentence = fmt.Sprintf("The connection Docker is set to use, %s, doesn't let this account in. Change its permissions, then check again.", d.Endpoint)
+		} else {
+			p.Sentence = "Docker is running, but this account isn't allowed to use it. In the COGNIX[WS] app, open Software › Docker Engine and choose Give access, then check again."
+		}
 	case StateRemote:
 		p.Title = "Docker points to another computer"
-		p.Sentence = fmt.Sprintf("Docker is set to reach %s, and this extension only manages Docker on this computer. Switch back with this command.", d.Endpoint)
-		p.Action = copyCmd("docker context use default")
+		if d.Source == SourceContext {
+			p.Sentence = fmt.Sprintf("Docker is set to reach %s, and this extension only manages Docker on this computer. Switch back with this command.", d.Endpoint)
+			p.Action = copyCmd("docker context use default")
+		} else {
+			p.Sentence = fmt.Sprintf("DOCKER_HOST sends Docker to %s, and this extension only manages Docker on this computer. Remove DOCKER_HOST, then check again.", d.Endpoint)
+		}
 	case StateNoEngine:
 		p.Title = "Docker's engine isn't installed"
 		p.Sentence = "Only the docker command is here. Install Docker Engine from COGNIX[WS]'s Software page, then check again."
@@ -75,15 +87,23 @@ func ProblemOf(d Diagnosis) Problem {
 	default:
 		p.State = StateSilent
 		p.Title = "Docker doesn't answer"
-		p.Sentence = "Docker's connection is there but doesn't answer. Restart Docker, then check again."
+		if chosen {
+			p.Sentence = fmt.Sprintf("The connection Docker is set to use, %s, doesn't answer. Start that engine, then check again.", d.Endpoint)
+		} else {
+			p.Sentence = "Docker's connection is there but doesn't answer. Restart Docker, then check again."
+		}
 	}
 	return p
 }
 
+var connectCache = &Cache{TTL: 2 * time.Second}
+
 // Connect reaches the first engine Diagnose finds; otherwise a
 // *NotReadyError says which case it is.
 func Connect(ctx context.Context) (*Client, error) {
-	d := Diagnose(ctx, LocalSystem())
+	// Kept two seconds: the panel reads several routes at once, and the
+	// engine watcher retries every few seconds while Docker is down.
+	d := connectCache.Get("", func() Diagnosis { return Diagnose(ctx, LocalSystem(nil)) })
 	if d.State != StateReady {
 		return nil, &NotReadyError{Diagnosis: d}
 	}
