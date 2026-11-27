@@ -594,6 +594,8 @@ body {
 }
 .dk-state-box h3 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
 .dk-state-box p { font-size: 13px; color: var(--dk-muted); margin-bottom: 14px; line-height: 1.5; }
+/* The command a case asks for, selectable as one piece. */
+.dk-cmd { display: block; width: fit-content; max-width: 100%; margin: -4px 0 14px; padding: 6px 10px; border: 1px solid var(--dk-border-strong); border-radius: 6px; font: 12px/1.4 var(--dk-mono); overflow-wrap: anywhere; user-select: all; }
 
 /* Sections (Health, Resources, Plans) */
 .dk-section-card {

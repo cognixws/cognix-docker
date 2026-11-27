@@ -227,13 +227,41 @@
     else if (S.view === "plans") drawPlansView(main, ov);
   }
 
-  function drawStacksView(main, ov) {
-    if (!ov || !ov.reachable) {
-      main.innerHTML = `<div class="dk-state-box">
-        <h3>Cannot reach Docker on this computer</h3>
-        <p>${esc((ov && ov.error) || "Docker is stopped or this account lacks permission to connect, so start Docker and check again.")}</p>
+  // Docker cannot be used: which case (the server's problem, the same table
+  // as COGNIX[WS]'s Software row), one sentence and one action. A helper
+  // that did not start is its own case: Docker was never asked.
+  function notUsableBox(ov) {
+    const p = ov && ov.problem;
+    if (ov && ov.helperFailed) {
+      return `<div class="dk-state-box" role="alert">
+        <h3>The Docker extension didn't start</h3>
+        <p title="${esc(ov.error || "")}">Its helper didn't answer, so Docker wasn't checked. Restart the extension from its settings.</p>
+        ${placesDoor
+          ? `<button class="dk-btn is-primary" type="button" data-act="open-ext-settings">Open settings</button>`
+          : `<button class="dk-btn is-primary" type="button" data-act="retry">Check again</button>`}
+      </div>`;
+    }
+    if (!p) {
+      return `<div class="dk-state-box" role="alert">
+        <h3>Docker doesn't answer</h3>
+        <p>${esc((ov && ov.error) || "Docker didn't answer on this computer.")}</p>
         <button class="dk-btn is-primary" type="button" data-act="retry">Check again</button>
       </div>`;
+    }
+    const copy = p.action && p.action.kind === "copy";
+    return `<div class="dk-state-box" role="alert" data-state="${esc(p.state)}">
+      <h3>${esc(p.title)}</h3>
+      <p>${esc(p.sentence)}</p>
+      ${copy ? `<code class="dk-cmd">${esc(p.action.command)}</code>` : ""}
+      ${copy
+        ? `<button class="dk-btn is-primary" type="button" data-act="copy-fix" data-cmd="${esc(p.action.command)}">${esc(p.action.label)}</button>`
+        : `<button class="dk-btn is-primary" type="button" data-act="retry">${esc((p.action && p.action.label) || "Check again")}</button>`}
+    </div>`;
+  }
+
+  function drawStacksView(main, ov) {
+    if (!ov || !ov.reachable) {
+      main.innerHTML = notUsableBox(ov);
       return;
     }
 
@@ -417,11 +445,7 @@
 
   function drawHealthView(main, ov) {
     if (!ov || !ov.reachable) {
-      main.innerHTML = `<div class="dk-state-box">
-        <h3>Cannot reach Docker on this computer</h3>
-        <p>${esc((ov && ov.error) || "Docker is stopped or this account lacks permission to connect, so start Docker and check again.")}</p>
-        <button class="dk-btn is-primary" type="button" data-act="retry">Check again</button>
-      </div>`;
+      main.innerHTML = notUsableBox(ov);
       return;
     }
 
@@ -481,11 +505,7 @@
 
   function drawResourcesView(main, ov) {
     if (!ov || !ov.reachable) {
-      main.innerHTML = `<div class="dk-state-box">
-        <h3>Cannot reach Docker on this computer</h3>
-        <p>${esc((ov && ov.error) || "Docker is stopped or this account lacks permission to connect, so start Docker and check again.")}</p>
-        <button class="dk-btn is-primary" type="button" data-act="retry">Check again</button>
-      </div>`;
+      main.innerHTML = notUsableBox(ov);
       return;
     }
 
@@ -785,7 +805,9 @@
         }
       }
     } catch (e) {
-      S.overview = { reachable: false, error: e.message, groups: [], openIncidents: [], pendingPlans: [] };
+      // /overview always answers 200 while the helper runs: a throw means
+      // the extension's own process did not answer, not Docker.
+      S.overview = { reachable: false, helperFailed: true, error: e.message, groups: [], openIncidents: [], pendingPlans: [] };
     } finally {
       S.loading = false;
       drawMain();
@@ -913,6 +935,7 @@
     }
     if (act === "clear-filters") { S.search = ""; S.filter = "all"; drawMain(); return; }
     if (act === "retry") { await refreshAll(true); return; }
+    if (act === "copy-fix") { await copyText(actEl.dataset.cmd || "", "Copied. Run it in a COGNIX[WS] terminal, then come back here."); return; }
     if (act === "go-plans") { switchView("plans"); return; }
     if (act === "go-stacks") { switchView("stacks"); return; }
     if (act === "open-ext-settings" && placesDoor) { await placesDoor.settings(); return; }

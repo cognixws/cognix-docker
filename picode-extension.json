@@ -1,7 +1,7 @@
 {
   "id": "docker",
   "name": "Docker",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "apiVersion": 22,
   "publisher": "COGNIX[WS]",
   "description": "Manage local Docker stacks and containers with your agents: Compose deploys, multiplexed logs, health monitors, diagnosis and reviewed cleanup.",
